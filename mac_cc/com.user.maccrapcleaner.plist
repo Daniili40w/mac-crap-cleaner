@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Еженедельная автоочистка Mac Crap Cleaner (MacCC).
+
+  Установка:
+    1. замените USERNAME на своё имя пользователя (3 места ниже);
+    2. cp com.user.maccrapcleaner.plist ~/Library/LaunchAgents/
+    3. launchctl load ~/Library/LaunchAgents/com.user.maccrapcleaner.plist
+    4. tail -f ~/Library/Logs/mac_crap_cleaner.log
+
+  Отключение:
+    launchctl unload ~/Library/LaunchAgents/com.user.maccrapcleaner.plist
+
+  Замечания:
+    * в расписании НЕ используется sudo (некому вводить пароль), поэтому
+      системные кэши пропускаются — это нормально;
+    * НЕ используется --hard: всё удалённое попадает в Корзину и обратимо;
+    * служебный каталог программы — ~/.mac_tweaker (журнал, бэкапы настроек
+      и отключённые plist'ы автозагрузки); имя каталога сохранено для
+      совместимости с журналами старых версий.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.maccrapcleaner</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/USERNAME/bin/maccc_bundle.py</string>
+        <string>--no-color</string>
+        <string>clean</string>
+        <string>--profile</string>
+        <string>dev</string>
+        <string>--older-than-days</string>
+        <string>30</string>
+        <string>--no-commands</string>
+        <string>-y</string>
+    </array>
+
+    <!-- Каждое воскресенье в 04:00 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/USERNAME/Library/Logs/mac_crap_cleaner.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/USERNAME/Library/Logs/mac_crap_cleaner.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>ru_RU.UTF-8</string>
+        <key>NO_COLOR</key>
+        <string>1</string>
+    </dict>
+
+    <!-- не мешать системе: низкий приоритет CPU и ввода-вывода -->
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
