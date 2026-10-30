@@ -847,11 +847,22 @@ if zp.exists():
         check(any(n.endswith("MacOS/launcher") for n in names), "zip содержит launcher")
         zi = zf.getinfo("Mac Crap Cleaner.app/Contents/MacOS/launcher")
         check((zi.external_attr >> 16) & 0o111 != 0, "zip сохраняет права +x")
-# launcher: fallback-цепочка доводит до программы даже без osascript/open
+# launcher: fallback-цепочка доводит до программы даже без osascript/open.
+# На настоящем Mac osascript/open реально открыли бы окно Terminal — поэтому
+# подсовываем в PATH заглушки, которые всегда возвращают ошибку (честная
+# эмуляция «не-macOS или ssh»; dirname и прочие утилиты остаются доступными).
+_nogui = Path("/tmp/maccc_nogui")
+_nogui.mkdir(exist_ok=True)
+for _stub in ("osascript", "open"):
+    _sp = _nogui / _stub
+    _sp.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    _sp.chmod(0o755)
+env_fb = dict(env)
+env_fb["PATH"] = f"{_nogui}{os.pathsep}{env.get('PATH', os.defpath)}"
 lr = subprocess.run([str(lc)], input="0\n", capture_output=True, text=True,
-                    env=env, timeout=120, cwd="/tmp")
+                    env=env_fb, timeout=120, cwd="/tmp")
 check(lr.returncode == 0 and ("текстовый режим" in lr.stdout or "text mode" in lr.stdout),
-      "launcher доводит до программы (fallback без macOS)")
+      "launcher доводит до программы (fallback без osascript/open)")
 
 # --------------------------------------------------------------------------- #
 section("osprofile: версионированный конфиг (macOS 12–27)")
@@ -891,7 +902,11 @@ check("ai_models" in osp.get_target_paths(P, major=26),
 m = osp.SNAPSHOT_RE.search("com.apple.TimeMachine.2026-10-01-043000.local")
 check(bool(m) and m.group(1) == "2026-10-01-043000", "разбор имени снапшота")
 check(osp.list_local_snapshots("/") == [], "без tmutil список снапшотов пуст")
-check(osp.has_full_disk_access(P) is None, "FDA-проверка вне macOS → None")
+if os.uname().sysname == "Darwin":
+    check(osp.has_full_disk_access(P) in (True, False, None),
+          "FDA-проверка на macOS → True/False/None (без падений)")
+else:
+    check(osp.has_full_disk_access(P) is None, "FDA-проверка вне macOS → None")
 ok, msg = osp.delete_local_snapshot("не-дата")
 check(not ok, "delete_local_snapshot отвергает мусорную дату")
 

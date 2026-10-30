@@ -707,8 +707,13 @@ class Deleter:
 
     def _finder_available(self) -> bool:
         if self._finder_ok is None:
+            # Finder переносит файлы в НАСТОЯЩУЮ ~/.Trash, а журнал отката ищет
+            # их в paths.trash. Поэтому Finder — только когда работаем с реальным
+            # домашним каталогом (в тестах/песочнице с MACTWEAKER_HOME — mv).
             self._finder_ok = (
                 os.uname().sysname == "Darwin" and have("osascript")
+                and not os.environ.get("MACTWEAKER_HOME")
+                and self.paths.home == Path(os.path.expanduser("~"))
             )
         return self._finder_ok
 
