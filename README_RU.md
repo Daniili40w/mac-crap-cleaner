@@ -16,21 +16,70 @@ mac_tweaker/
 ├── build_bundle.py             # сборка в один файл dist/maccc_bundle.py
 ├── mactweaker/
 │   ├── __init__.py
-│   ├── safety.py               # предохранители, stat-обёртки, Корзина, журнал
+│   ├── safety.py               # предохранители, stat-обёртки, Корзина, журнал, учёт TCC-отказов
+│   ├── osprofile.py            # профиль версии macOS: фичи, пути, FDA, APFS-снапшоты
 │   ├── system.py               # сведения о системе и дисках
-│   ├── junk.py                 # кэши + глубокий скан хлама
-│   ├── leftovers.py            # остатки удалённых программ («сироты»)
+│   ├── junk.py                 # кэши + глубокий скан хлама (параллельный обход)
+│   ├── leftovers.py            # остатки удалённых программ («сироты», вкл. Electron/Tauri)
 │   ├── startup.py              # LaunchAgents / LaunchDaemons / Login Items / BTM
-│   ├── tweaks.py               # настройки через defaults (обратимо)
+│   ├── schedule.py             # launchd-агент еженедельной автоочистки
+│   ├── tweaks.py               # настройки через defaults (обратимо, с гейтингом по версии)
 │   ├── ui.py                   # движок псевдографики (чистые функции рендера)
 │   ├── app.py                  # экраны и главный цикл
 │   └── cli.py                  # субкоманды для скриптов и cron
 └── tests/
     ├── make_fake_home.sh       # стенд: фейковое «маковское» дерево
-    ├── test_all.py             # 185 проверок (логика + CLI + рендер)
-    ├── test_tui_pty.py         # 18 проверок: TUI в настоящем pty
+    ├── test_all.py             # 346 проверок (логика + CLI + рендер)
+    ├── test_tui_pty.py         # 27 проверок: TUI в настоящем pty
     └── render_preview.py       # рендер экранов в текст/HTML
 ```
+
+---
+
+## Совместимость с версиями macOS
+
+Версия ОС читается один раз при старте (`platform.mac_ver()`) и упаковывается в
+профиль `OSFeatures` (dataclass): сканеры берут готовые пути и флаги из него,
+а не размазывают `if/else` по коду. При выходе новой macOS новая ветка
+добавляется в одном месте — `osprofile.get_os_features()`.
+
+| macOS | Что меняется в профиле |
+| --- | --- |
+| Ventura (13) | автозагрузка управляется через Background Task Management |
+| Sonoma (14) | кэши виджетов рабочего стола; открываются твики Stage Manager/виджетов |
+| Sequoia (15) | управление iPhone Mirroring; учитывается ужесточение TCC |
+| Tahoe (26) | кэши локальных моделей Apple Intelligence (⚠ только вручную); проверка APFS-снапшотов — главной причины «иллюзии свободного места» |
+| Golden Gate (27) | Intel больше не поддерживается: проверки Rosetta/x86 пропускаются; добавлены хранилища весов ИИ |
+
+* **Права доступа (TCC) проверяются явно.** Если у терминала нет Full Disk
+  Access, утилита не молчит: каждый `PermissionError` запоминается, а в статус
+  выводится «Нет прав на сканирование X — выдайте Полный доступ к диску» с точным
+  путём в Системных настройках.
+* **APFS-снапшоты (клавиша `S` / `maccc snapshots`).** Показывает локальные
+  снапшоты через `tmutil listlocalsnapshots /` и предлагает удалить устаревшие —
+  иначе очистка кэшей «не освобождает» место: блоки держат снапшоты.
+* **Современные пожиратели места — под отдельным подтверждением.** Ollama
+  (`~/.ollama/models`), LM Studio, OrbStack, диски виртуалок Docker Desktop и кэш
+  HuggingFace находятся профилем `dev`, помечаются ⚠, НЕ отмечаются автоматически
+  и удаляются только после явного подтверждения: это веса моделей и образы
+  контейнеров, а не кэш.
+* **Параллельный обход дерева.** Чтение каталогов и подсчёт размеров идут в
+  `concurrent.futures.ThreadPoolExecutor` из стандартной библиотеки — на APFS с
+  миллионами мелких файлов интерфейс больше не «зависает», а правило «ноль
+  зависимостей» не нарушено.
+* **Ревизия системных твиков под macOS 14/15.** Мёртвые переключатели
+  `defaults write` удалены (анимация Dock, turbo boost на чужом домене, датчик
+  падения HDD, звук входа на Apple Silicon и т.п.), добавлены новые: Stage Manager,
+  скрытие виджетов на рабочем столе, «клик по обоям», отключение iPhone Mirroring.
+  Каждый твик гейтится по версии ОС и не показывается там, где не работает.
+* **Умный поиск сирот.** Electron/Tauri-программы часто оставляют профиль с
+  неполным `Info.plist`: папка в Application Support теперь узнаётся по структуре
+  (GPUCache, Local Storage, …) и помечается СИРОТА, если приложение удалено.
+  Group Containers сверяются по префиксу id: `group.com.docker` больше не ложная
+  сирота при установленном `com.docker.docker`.
+* **Автоочистка по расписанию (launchd).** Пункт меню «9» / `maccc schedule install`
+  создаёт `~/Library/LaunchAgents/com.dan1lazz.maccc.plist`: раз в неделю базовый
+  профиль, всё в Корзину, без sudo, тихий отчёт в `~/.mac_tweaker/scheduled.log`.
 
 ---
 
@@ -278,6 +327,21 @@ Finder, Скриншоты, Dock, Интерфейс, Безопасность, 
 `u` — вернуть из Корзины всё удалённое в этой сессии,
 `Backspace` — восстановить всю отключённую автозагрузку.
 
+### 8. APFS-снапшоты (клавиша `S`)
+
+Открывается из главного меню или экрана «о системе». Отвечает на вопрос
+эпохи Tahoe «почистил 10 ГБ кэшей — почему свободного места не прибавилось?»:
+удалённые блоки держат локальные снапшоты APFS. Экран показывает список
+снапшотов (`tmutil listlocalsnapshots /`) и удаляет отмеченные (`d`) или все
+(`x`, нужен sudo, необратимо).
+
+### 9. Автоочистка по расписанию (launchd)
+
+Создаёт `~/Library/LaunchAgents/com.dan1lazz.maccc.plist`: еженедельный запуск
+выбранного профиля, всё в Корзину, без sudo, тихий отчёт в
+`~/.mac_tweaker/scheduled.log`. `w`/`h`/`p` — день, час и профиль;
+`Enter` — установить агент, `d` — удалить.
+
 ---
 
 ## CLI-режим (для cron, ssh и скриптов)
@@ -325,6 +389,20 @@ python3 maccc.py tweaks export
 # журнал
 python3 maccc.py undo --list
 python3 maccc.py undo -y                              # вернуть из Корзины
+
+# APFS-снапшоты («почистил кэши, а место не появилось?» — вот почему)
+python3 maccc.py snapshots                            # список локальных снапшотов
+python3 maccc.py snapshots --delete-all --sudo -y     # удалить (необратимо)
+
+# автоочистка по расписанию (launchd)
+python3 maccc.py schedule status
+python3 maccc.py schedule install --weekday 0 --hour 4   # воскресенье 04:00, basic
+python3 maccc.py schedule install --profile dev --weekday 3 --hour 5
+python3 maccc.py schedule uninstall -y
+
+# опасные цели (веса ИИ-моделей, диски Docker/OrbStack) по умолчанию
+# пропускаются; включаются явным флагом:
+python3 maccc.py clean --profile dev --dangerous -y
 ```
 
 Без TTY (пайп, cron) автоматически включается текстовое меню вместо псевдографики.
@@ -390,7 +468,7 @@ for p in ("/tmp/fake_mac/home/Library/Application Support/RemovedApp",
     os.path.exists(p) and os.utime(p, (old, old))
 PY
 
-# 3. прогнать 185 проверок
+# 3. прогнать 346 проверок
 HOME=/tmp/fake_mac/home \
 MACTWEAKER_HOME=/tmp/fake_mac/home \
 MACTWEAKER_SYSROOT=/tmp/fake_mac/sys \
@@ -405,7 +483,7 @@ open /tmp/preview/preview.html
 # 5. собрать single-file bundle
 python3 build_bundle.py && python3 dist/maccc_bundle.py --version
 
-# 6. прогнать TUI в настоящем псевдотерминале (18 проверок)
+# 6. прогнать TUI в настоящем псевдотерминале (27 проверок)
 chmod -R a+rwX /tmp/fake_mac
 HOME=/tmp/fake_mac/home MACTWEAKER_HOME=/tmp/fake_mac/home \
 MACTWEAKER_SYSROOT=/tmp/fake_mac/sys \
@@ -484,17 +562,34 @@ codesign --force --deep -s - '/Applications/Mac Crap Cleaner.app'
 
 ## Автоочистка по расписанию (launchd)
 
+С версии 2.2 агент создаётся встроенным генератором — в TUI это пункт меню
+**«9. Автоочистка по расписанию»** (Enter — установить, `w`/`h`/`p` — день, час,
+профиль, `d` — удалить), а из CLI:
+
+```bash
+python3 maccc.py schedule install --weekday 0 --hour 4   # воскресенье 04:00
+python3 maccc.py schedule status
+python3 maccc.py schedule uninstall -y
+```
+
+Генератор создаёт `~/Library/LaunchAgents/com.dan1lazz.maccc.plist` и сам
+загружает его через `launchctl bootstrap` (с откатом на `launchctl load`).
+По умолчанию: `clean --profile basic --older-than-days 30 --no-commands -y`
+раз в неделю, тихий отчёт каждого запуска — в `~/.mac_tweaker/scheduled.log`.
+В расписании не используется `sudo` (нет терминала для пароля), не используется
+`--hard` (всё уходит в Корзину) и никогда не запускаются «опасные» цели
+(веса моделей, диски виртуалок). Низкий приоритет CPU/IO (`Nice`,
+`LowPriorityIO`, `ProcessType=Background`), чтобы уборка не мешала работе.
+
+Ручной вариант (как раньше) тоже доступен:
+
 ```bash
 cp com.user.maccrapcleaner.plist ~/Library/LaunchAgents/
 # отредактируйте USERNAME в путях, затем:
 launchctl load ~/Library/LaunchAgents/com.user.maccrapcleaner.plist
-launchctl list | grep mactweaker
-cat ~/Library/Logs/mac_crap_cleaner.log
+launchctl list | grep maccrapcleaner
+tail -f ~/Library/Logs/mac_crap_cleaner.log
 ```
-
-По умолчанию: `clean --profile dev --older-than-days 30 -y` каждое воскресенье
-в 04:00. В расписании не используется `sudo` (нет терминала для пароля) и не
-используется `--hard` — всё уходит в Корзину.
 
 ---
 

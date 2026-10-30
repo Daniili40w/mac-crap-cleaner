@@ -854,6 +854,211 @@ check(lr.returncode == 0 and ("текстовый режим" in lr.stdout or "t
       "launcher доводит до программы (fallback без macOS)")
 
 # --------------------------------------------------------------------------- #
+section("osprofile: версионированный конфиг (macOS 12–27)")
+from mactweaker import osprofile as osp
+
+f12 = osp.get_os_features(major=12, arch="arm64")
+f13 = osp.get_os_features(major=13, arch="arm64")
+f14 = osp.get_os_features(major=14, arch="arm64")
+f15 = osp.get_os_features(major=15, arch="arm64")
+f26 = osp.get_os_features(major=26, arch="arm64")
+f27 = osp.get_os_features(major=27, arch="arm64")
+check(not f12.has_btm and f13.has_btm, "BTM: Ventura (13) и новее")
+check(not f13.has_desktop_widgets and f14.has_desktop_widgets,
+      "виджеты на рабочем столе: Sonoma (14)+")
+check(not f14.has_iphone_mirroring and f15.has_iphone_mirroring,
+      "iPhone Mirroring: Sequoia (15)+")
+check(f26.name == "Tahoe" and f26.needs_snapshot_check,
+      "Tahoe (26): нужна проверка APFS-снапшотов")
+check(bool(f26.ai_caches_paths) and
+      any("CoreSpeech" in p for p in f26.ai_caches_paths),
+      "Tahoe: кэши локального ИИ в профиле")
+check(f27.name == "Golden Gate" and not f27.supports_intel,
+      "Golden Gate (27): Intel больше не поддерживается")
+check(f27.is_apple_silicon and any("Apple Intelligence" in p
+                                   for p in f27.ai_caches_paths),
+      "Golden Gate: хранилище весов Apple Intelligence")
+check(not f15.needs_snapshot_check and not f15.ai_caches_paths,
+      "Sequoia (15): ИИ-кэшей и снапшот-проверки ещё нет")
+tp14 = osp.get_target_paths(P, major=14)
+tp12 = osp.get_target_paths(P, major=12)
+check("background_tasks" in tp14 and "background_tasks" not in tp12,
+      "get_target_paths: BTM-пути с Ventura")
+check("widgets_cache" in tp14 and "widgets_cache" not in tp12,
+      "get_target_paths: кэш виджетов с Sonoma")
+check("ai_models" in osp.get_target_paths(P, major=26),
+      "get_target_paths: пути ИИ-моделей с Tahoe")
+m = osp.SNAPSHOT_RE.search("com.apple.TimeMachine.2026-10-01-043000.local")
+check(bool(m) and m.group(1) == "2026-10-01-043000", "разбор имени снапшота")
+check(osp.list_local_snapshots("/") == [], "без tmutil список снапшотов пуст")
+check(osp.has_full_disk_access(P) is None, "FDA-проверка вне macOS → None")
+ok, msg = osp.delete_local_snapshot("не-дата")
+check(not ok, "delete_local_snapshot отвергает мусорную дату")
+
+section("safety: реестр отказов доступа (TCC)")
+from mactweaker import safety as saf
+saf.reset_denied()
+check(saf.denied_paths() == [], "после reset реестр пуст")
+saf.record_denied(str(HOME / "Library" / "Mail"))
+saf.record_denied(str(HOME / "Library" / "Mail" / "Envelope Index"))
+saf.record_denied("/some/other/place")
+warns = saf.permission_warnings(P, limit=5)
+check(warns == ["~/Library/Mail"],
+      f"в предупреждениях только домашние пути, ребёнок схлопнут: {warns}")
+saf.reset_denied()
+check(saf.denied_paths() == [], "reset снова очищает")
+check(saf.workers() >= 1, "workers() возвращает число потоков")
+os.environ["MACTWEAKER_NO_THREADS"] = "1"
+check(saf.workers() == 1, "MACTWEAKER_NO_THREADS=1 → один поток")
+os.environ.pop("MACTWEAKER_NO_THREADS", None)
+
+section("safety: точечные исключения в защищённых зонах")
+check(is_safe(HOME / "Library/Containers/com.x/Data/Library/Caches/tmp", P),
+      "кэш внутри Container чистить разрешено")
+check(not is_safe(HOME / "Library/Containers/com.x/Data/Documents", P),
+      "документы внутри Container по-прежнему защищены")
+check(is_safe(HOME / "Library/Containers/com.docker.docker/Data/vms/0/Docker.raw", P),
+      "диск Docker Desktop — разрешённая цель (под подтверждением)")
+check(not is_safe(HOME / "Library/Group Containers/group.com.x", P),
+      "Group Containers защищены")
+
+section("junk: современные пожиратели места (опасные цели)")
+tg = junk.scan_junk(P, profile="dev", with_commands=False)
+oll = [t for t in tg if "Ollama" in t.name]
+check(bool(oll), "Ollama: модели найдены")
+check(oll[0].dangerous and not oll[0].selected,
+      "Ollama: помечена опасной и НЕ отмечена по умолчанию")
+check(oll[0].size >= 5 * 1024 ** 2, f"Ollama: размер {human(oll[0].size)}")
+orb = [t for t in tg if "OrbStack" in t.name]
+check(bool(orb) and orb[0].dangerous and not orb[0].selected,
+      "OrbStack: опасная цель, не отмечена")
+lms = [t for t in tg if "LM Studio" in t.name]
+check(bool(lms) and lms[0].dangerous, "LM Studio: модели найдены")
+check(all(t.selected for t in tg if not t.dangerous),
+      "обычные цели отмечены по умолчанию")
+
+section("junk: кэши Apple Intelligence появляются только с Tahoe")
+os.environ["MACTWEAKER_MACOS_MAJOR"] = "15"
+tg15 = junk.scan_junk(P, profile="basic", with_commands=False)
+check(not any("Apple Intelligence" in t.name for t in tg15),
+      "на Sequoia (15) ИИ-кэшей в целях нет")
+os.environ["MACTWEAKER_MACOS_MAJOR"] = "26"
+ai_dir = HOME / "Library" / "Caches" / "com.apple.CoreSpeech"
+ai_dir.mkdir(parents=True, exist_ok=True)
+(ai_dir / "voice.bin").write_bytes(b"x" * 4096)
+tg26 = junk.scan_junk(P, profile="basic", with_commands=False)
+ai = [t for t in tg26 if "Apple Intelligence" in t.name]
+check(bool(ai), "на Tahoe (26) ИИ-кэш найден")
+check(ai and ai[0].dangerous and not ai[0].selected,
+      "ИИ-кэш: только под отдельным подтверждением")
+os.environ.pop("MACTWEAKER_MACOS_MAJOR", None)
+
+section("junk: параллельный глубокий скан = последовательный")
+os.environ["MACTWEAKER_NO_THREADS"] = "1"
+seq_items = junk.deep_scan(P, max_depth=7, risk_max=junk.RISK_ADVICE)
+os.environ.pop("MACTWEAKER_NO_THREADS", None)
+par_items = junk.deep_scan(P, max_depth=7, risk_max=junk.RISK_ADVICE)
+check({str(i.path) for i in seq_items} == {str(i.path) for i in par_items},
+      "параллельный обход находит те же пути")
+check(sum(i.size for i in seq_items) == sum(i.size for i in par_items),
+      "суммарные размеры совпадают")
+check(len(par_items) > 0, f"найдено объектов: {len(par_items)}")
+
+section("leftovers: Electron/Tauri и Group Containers")
+reg2 = leftovers.AppRegistry.build(P, use_spotlight=False, include_processes=False)
+check(reg2.has_id_prefix("com.example"),
+      "has_id_prefix: com.example → установлен com.example.mytool")
+check(not reg2.has_id_prefix("com.nope"), "has_id_prefix: чужой префикс")
+ghost = HOME / "Library" / "Application Support" / "GhostedApp"
+check(leftovers.looks_like_app_profile(ghost),
+      "профиль Electron узнаётся по маркерам (GPUCache, Local Storage…)")
+check(not leftovers.looks_like_app_profile(
+    HOME / "Library" / "Application Support" / "ImportantStuff"),
+      "ImportantStuff не похож на профиль приложения")
+v = leftovers.classify("GhostedApp", "GhostedApp", "name", reg2, P,
+                       full_path=ghost)
+check(v[0] == leftovers.VERDICT_ORPHAN, f"GhostedApp → СИРОТА ({v[0]})")
+v2 = leftovers.classify("ImportantStuff", "ImportantStuff", "name", reg2, P,
+                        full_path=HOME / "Library" / "Application Support" / "ImportantStuff")
+check(v2[0] == leftovers.VERDICT_UNKNOWN, "ImportantStuff остаётся «неясно»")
+orph2 = leftovers.scan_leftovers(P, registry=reg2)
+op2 = {str(o.path) for o in orph2}
+check(any("GhostedApp" in p for p in op2), "скан нашёл осиротевшее Electron-приложение")
+check(not any("ABCDE12345" in p for p in op2),
+      "Group Container живого приложения не помечен сиротой")
+check(not any("com.example.sandboxed" in p for p in op2),
+      "контейнер вендора установленного приложения не сирота")
+
+section("tweaks: ревизия под macOS 13–15")
+ids_all = {t.tid for t in tweaks._all_tweaks()}
+for dead in ("perf-turbo", "perf-sudden-motion", "misc-rescue-sleep",
+             "dock-anim", "sec-guest", "ui-startup-sound"):
+    check(dead not in ids_all, f"мёртвый твик удалён: {dead}")
+ids12 = {t.tid for t in tweaks.all_tweaks(major=12, arch="arm64")}
+ids14 = {t.tid for t in tweaks.all_tweaks(major=14, arch="arm64")}
+ids15 = {t.tid for t in tweaks.all_tweaks(major=15, arch="arm64")}
+check("sm-stage-manager" not in ids12 and "sm-stage-manager" in ids15,
+      "Stage Manager: только Ventura+")
+check("sm-widgets-off" not in ids12 and "sm-widgets-off" in ids14,
+      "виджеты: только Sonoma+")
+check("sm-iphone-mirror-off" not in ids14 and "sm-iphone-mirror-off" in ids15,
+      "iPhone Mirroring: только Sequoia+")
+arm15 = {t.tid for t in tweaks.all_tweaks(major=15, arch="arm64")}
+intel15 = {t.tid for t in tweaks.all_tweaks(major=15, arch="x86_64")}
+check("ui-font-smoothing" in intel15 and "ui-font-smoothing" not in arm15,
+      "сглаживание шрифтов осталось только для Intel")
+check(len(ids15) >= 25, f"твиков на Sequoia: {len(ids15)}")
+check(all(t.description and t.domain and t.key
+          for t in tweaks.all_tweaks(major=15, arch="arm64")),
+      "у новых твиков заполнены домен/ключ/описание")
+
+section("schedule: launchd-агент еженедельной очистки")
+from mactweaker import schedule as sch
+pl = sch.agent_plist_path(P)
+check(str(pl).endswith("Library/LaunchAgents/com.dan1lazz.maccc.plist"),
+      f"путь агента: {P.short(pl)}")
+xml = sch.render_plist(P, profile="basic", weekday=3, hour=5, minute=30,
+                       runner=("/usr/bin/python3", "/fake/maccc_bundle.py"))
+check("<string>com.dan1lazz.maccc</string>" in xml, "Label агента")
+check("<integer>3</integer>" in xml and "<integer>5</integer>" in xml,
+      "расписание: среда, 05:xx")
+check("<string>basic</string>" in xml, "профиль basic в аргументах")
+check(str(P.state_dir / "scheduled.log") in xml,
+      "тихий отчёт пишется в ~/.mac_tweaker/")
+check("--no-commands" in xml and "-y" in xml, "флаги тихого запуска")
+check("--hard" not in xml, "агент НЕ удаляет жёстко")
+check("<key>Nice</key>" in xml and "LowPriorityIO" in xml,
+      "низкий приоритет CPU/IO")
+_data = _plist.loads(xml.encode("utf-8"))
+check(_data["Label"] == "com.dan1lazz.maccc", "plist валиден (plistlib)")
+check(_data["ProgramArguments"][0] == "/usr/bin/python3", "ProgramArguments")
+st = sch.agent_status(P)
+check(st.installed is False and st.loaded is False, "статус: агент не установлен")
+
+section("app: новые экраны (снапшоты и расписание)")
+render_ok(appmod.SnapshotsScreen(application), "SnapshotsScreen", keys=("r",))
+render_ok(appmod.ScheduleScreen(application), "ScheduleScreen",
+          keys=("w", "h", "p", "r"))
+render_ok(appmod.MainMenu(application), "MainMenu (9 и s)", keys=("9", "s"))
+
+section("cli: snapshots и schedule")
+r = cli("snapshots")
+check(r.returncode == 0, f"snapshots: rc={r.returncode}")
+check("только на macOS" in r.stdout or "снапшотов нет" in r.stdout,
+      "snapshots честно сообщает об окружении")
+r = cli("schedule", "status")
+check(r.returncode == 0 and "не установлен" in r.stdout,
+      f"schedule status: rc={r.returncode}")
+r = cli("clean", "--profile", "dev", "--dry-run", "-y", "--no-commands")
+check(r.returncode == 0, f"clean dev dry-run: rc={r.returncode}")
+check("Пропущены опасные цели" in r.stdout,
+      "clean без --dangerous пропускает веса моделей и диски VM")
+r = cli("clean", "--profile", "dev", "--dry-run", "-y", "--no-commands",
+        "--dangerous")
+check(r.returncode == 0 and "⚠" in r.stdout,
+      "clean --dangerous показывает предупреждение")
+
+# --------------------------------------------------------------------------- #
 print("\n" + "=" * 62)
 if FAILED:
     print(f"ПРОВАЛЕНО: {len(FAILED)} из {PASSED + len(FAILED)}")

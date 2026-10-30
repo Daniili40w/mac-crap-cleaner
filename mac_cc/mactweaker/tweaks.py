@@ -42,6 +42,13 @@ class Tweak:
     risky: bool = False
     state: bool = False
     raw: str = ""
+    #: Версионные ограничения: твик показывается только если
+    #: min_major <= версия macOS <= max_major (0 = без ограничения).
+    #: На неизвестной ОС (major == 0, например в тестах на Linux)
+    #: фильтрация по версии не применяется.
+    min_major: int = 0
+    max_major: int = 0
+    intel_only: bool = False          # на Apple Silicon не показывать
 
 
 def _all_tweaks() -> List[Tweak]:
@@ -115,10 +122,6 @@ def _all_tweaks() -> List[Tweak]:
           "Выключение убирает лишние иконки справа",
           "com.apple.dock", "show-recents", TYPE_BOOL, False, True,
           restart="Dock"),
-        T("dock-anim", "Dock", "Мгновенное появление (без анимации)",
-          "autohide-time-modifier = 0",
-          "com.apple.dock", "autohide-time-modifier", TYPE_FLOAT, 0.0, 1.0,
-          restart="Dock"),
 
         # ---------------- Система / интерфейс ----------------
         T("ui-dark", "Интерфейс", "Тёмная тема оформления",
@@ -136,7 +139,7 @@ def _all_tweaks() -> List[Tweak]:
         T("ui-font-smoothing", "Интерфейс", "Сглаживание шрифтов (среднее)",
           "AppleFontSmoothing: 0=выкл, 1=лёгкое, 2=среднее, 3=сильное",
           "Apple Global Domain", "AppleFontSmoothing", TYPE_INT, 2, None,
-          need_logout=True),
+          need_logout=True, intel_only=True),
         T("ui-key-repeat", "Интерфейс", "Быстрый повтор клавиш",
           "InitialKeyRepeat=15, KeyRepeat=2 — удобно в терминале и редакторах",
           "NSGlobalDomain", "KeyRepeat", TYPE_INT, 2, 6, need_logout=True),
@@ -144,9 +147,6 @@ def _all_tweaks() -> List[Tweak]:
           "Отключить надоедливый «бип»",
           "NSGlobalDomain", "com.apple.sound.beep.feedback", TYPE_BOOL,
           False, True),
-        T("ui-startup-sound", "Интерфейс", "Звук при включении",
-          "Классический аккорд при загрузке",
-          "com.apple.loginwindow", "LoginSound", TYPE_BOOL, False, True),
 
         # ---------------- Безопасность и приватность ----------------
         T("sec-firewall", "Безопасность", "Включить файрвол",
@@ -157,10 +157,6 @@ def _all_tweaks() -> List[Tweak]:
           "Не отвечать на ICMP-пинг и закрытые порты",
           "com.apple.alf", "allowstealthmode", TYPE_INT, 1, 0,
           need_logout=True, risky=True),
-        T("sec-guest", "Безопасность", "Отключить гостевой вход",
-          "GuestEnabled = 0",
-          "com.apple.loginwindow", "GuestEnabled", TYPE_BOOL, False, True,
-          need_logout=True),
         T("sec-screensaver-password", "Безопасность", "Пароль сразу после сна",
           "askForPassword=1, askForPasswordDelay=0",
           "com.apple.screensaver", "askForPassword", TYPE_INT, 1, 0),
@@ -170,10 +166,6 @@ def _all_tweaks() -> List[Tweak]:
           True, False, need_logout=True, risky=True),
 
         # ---------------- Производительность ----------------
-        T("perf-turbo", "Производительность", "Отключить turbo boost (Intel)",
-          "Меньше нагрев и троттлинг; на Apple Silicon не применяется",
-          "com.apple.TurboBoost", "Enabled", TYPE_BOOL, False, True,
-          risky=True),
         T("perf-ram-disks", "Производительность", "Не создавать RAM-диски Time Machine",
           "Отключает временные диски локальных снапшотов",
           "com.apple.TimeMachine", "DoNotOfferNewDisksForBackup", TYPE_BOOL,
@@ -182,9 +174,29 @@ def _all_tweaks() -> List[Tweak]:
           "Выключение освобождает место, но уменьшает защиту данных",
           "com.apple.TimeMachine", "AutoBackup", TYPE_BOOL, False, True,
           risky=True),
-        T("perf-sudden-motion", "Производительность", "Датчик падения (HDD)",
-          "Актуально только для Mac с жёстким диском",
-          "com.apple.sudden_motion", "sms", TYPE_INT, 0, 1, risky=True),
+
+        # ---------------- Новые возможности macOS 13–15 ----------------
+        # Мёртвые переключатели прежних лет (анимация Launchpad, turbo boost
+        # на чужом домене, датчик падения HDD, звук входа на Apple Silicon,
+        # «Sleep On Power Button» из root-домена) удалены: на macOS 14/15 они
+        # молча игнорировались. Новые фичи гейтятся по версии ОС (min_major)
+        # через osprofile.get_os_features().
+        T("sm-stage-manager", "Новые фичи macOS", "Stage Manager",
+          "Группировка окон слева; Ventura (13) и новее",
+          "com.apple.WindowManager", "GloballyEnabled", TYPE_BOOL, True, False,
+          restart="WindowManager", min_major=13),
+        T("sm-widgets-off", "Новые фичи macOS", "Скрыть виджеты на рабочем столе",
+          "Виджеты останутся в Центре уведомлений; Sonoma (14) и новее",
+          "com.apple.WindowManager", "StandardHideWidgets", TYPE_INT, 1, 0,
+          restart="WindowManager", min_major=14),
+        T("sm-wallpaper-click", "Новые фичи macOS", "Рабочий стол: только в Stage Manager",
+          "Клик по обоям не раздвигает окна; Sonoma (14) и новее",
+          "com.apple.WindowManager", "AutoHide", TYPE_INT, 1, 0,
+          restart="WindowManager", min_major=14),
+        T("sm-iphone-mirror-off", "Новые фичи macOS", "Отключить iPhone Mirroring",
+          "Запрет зеркалирования экрана iPhone; Sequoia (15), экспериментально",
+          "com.apple.ScreenContinuity", "prefsDisabled", TYPE_BOOL, True, False,
+          min_major=15, risky=True),
 
         # ---------------- Прочее ----------------
         T("misc-quicklook-text", "Прочее", "Выделять текст в Quick Look",
@@ -200,15 +212,32 @@ def _all_tweaks() -> List[Tweak]:
         T("misc-hotcorner-br", "Прочее", "Горячий угол: блокировка экрана",
           "Правый нижний угол → заблокировать экран",
           "com.apple.dock", "wvous-br-corner", TYPE_INT, 13, 0, restart="Dock"),
-        T("misc-rescue-sleep", "Прочее", "Не спать при подключённом питании",
-          "Удобно для загрузок и долгих сборок",
-          "com.apple.PowerManagement", "Sleep On Power Button", TYPE_BOOL,
-          False, True, risky=True),
     ]
 
 
-def all_tweaks() -> List[Tweak]:
-    return _all_tweaks()
+def all_tweaks(major: Optional[int] = None,
+               arch: Optional[str] = None) -> List[Tweak]:
+    """Твики, применимые к этой macOS.
+
+    major == 0/None на не-macOS (тесты, предпросмотр) → показываются все:
+    фильтровать не по чему. intel_only скрывается только на arm64.
+    """
+    from . import osprofile
+    if major is None:
+        major = osprofile.macos_major()
+    if arch is None:
+        arch = osprofile.get_os_features(major=major).arch or ""
+    out = []
+    for t in _all_tweaks():
+        if major > 0:
+            if t.min_major and major < t.min_major:
+                continue
+            if t.max_major and major > t.max_major:
+                continue
+        if t.intel_only and arch == "arm64":
+            continue
+        out.append(t)
+    return out
 
 
 def sections(tweaks: Sequence[Tweak]) -> List[str]:

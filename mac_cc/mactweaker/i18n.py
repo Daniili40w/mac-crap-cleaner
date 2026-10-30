@@ -842,6 +842,180 @@ CATALOG: Dict[str, str] = {
     "Выбор языка": "Language selection",
     "Язык переключён: {lang}": "Language switched: {lang}",
     "язык": "language",
+
+    # ---- v2.2: права доступа (TCC / Full Disk Access) ----
+    "⚠ нет Full Disk Access: защищённые каталоги (Mail, Messages…) будут пропущены":
+        "⚠ no Full Disk Access: protected folders (Mail, Messages…) will be skipped",
+    "⚠ Нет Full Disk Access: ": "⚠ No Full Disk Access: ",
+    "Нет Full Disk Access: ": "No Full Disk Access: ",
+    "Системные настройки → Приватность и безопасность → "
+    "Полный доступ к диску → включите ваш терминал":
+        "System Settings → Privacy & Security → Full Disk Access → enable your terminal",
+    "Нет прав на сканирование {n} каталогов: {ex}":
+        "No permission to scan {n} folders: {ex}",
+    "Нет прав на сканирование {n} каталогов: {ex}. "
+    "Выдайте терминалу Полный доступ к диску (FDA)":
+        "No permission to scan {n} folders: {ex}. Grant the terminal Full Disk Access (FDA)",
+    "⚠ Нет прав (TCC): {ex} — выдайте терминалу Полный доступ к диску":
+        "⚠ No access (TCC): {ex} — grant the terminal Full Disk Access",
+
+    # ---- v2.2: версионированный профиль ОС ----
+    "Профиль ОС: {name} ({major})": "OS profile: {name} ({major})",
+    "только Apple Silicon": "Apple Silicon only",
+    "проверьте APFS-снапшоты (maccc snapshots)":
+        "check APFS snapshots (maccc snapshots)",
+
+    # ---- v2.2: ИИ и контейнеры (опасные цели) ----
+    "ИИ и контейнеры": "AI & containers",
+    "Ollama: веса LLM-моделей (~/.ollama/models)":
+        "Ollama: LLM model weights (~/.ollama/models)",
+    "НЕ кэш! Это веса моделей: каждая заново скачивается гигабайтами. "
+    "Удаляйте только неиспользуемые модели (ollama rm).":
+        "NOT a cache! These are model weights: each one re-downloads for gigabytes. "
+        "Delete only unused models (ollama rm).",
+    "LM Studio: скачанные модели": "LM Studio: downloaded models",
+    "НЕ кэш! Библиотека моделей и незавершённые загрузки. "
+    "Настройки и история чатов не трогаются.":
+        "NOT a cache! The model library and incomplete downloads. "
+        "Settings and chat history are not touched.",
+    "OrbStack: данные виртуалок и контейнеров":
+        "OrbStack: VM and container data",
+    "НЕ кэш! Виртуальные диски со всеми контейнерами, томами и "
+    "Linux-машинами. Альтернатива: orbctl delete / docker prune.":
+        "NOT a cache! Virtual disks holding all containers, volumes and "
+        "Linux machines. Alternative: orbctl delete / docker prune.",
+    "Docker Desktop: диск виртуалки (все образы)":
+        "Docker Desktop: VM disk (all images)",
+    "НЕ кэш! Docker.raw хранит ВСЕ образы, контейнеры и volumes. "
+    "Для точечной очистки используйте docker system prune.":
+        "NOT a cache! Docker.raw stores ALL images, containers and volumes. "
+        "For selective cleanup use docker system prune.",
+    "HuggingFace: кэш скачанных моделей": "HuggingFace: downloaded model cache",
+    "Модели и датасеты из hub: перескачаются при следующем запуске. "
+    "Проверьте, не используются ли они в ваших проектах.":
+        "Models and datasets from the hub: re-downloaded on next run. "
+        "Check that your projects do not rely on them.",
+    "Apple Intelligence: кэши локальных моделей":
+        "Apple Intelligence: local model caches",
+    "Веса локальных ИИ-моделей системы (речь, Siri). После удаления macOS "
+    "скачает их заново — это гигабайты трафика. Только если уверены.":
+        "Weights of the system's local AI models (speech, Siri). After deletion "
+        "macOS re-downloads them — gigabytes of traffic. Only if you are sure.",
+    "⚠ ОПАСНЫЕ ЦЕЛИ — это НЕ кэш, а данные:":
+        "⚠ DANGEROUS TARGETS — this is NOT cache, it is data:",
+    "Веса моделей и диски контейнеров придётся создавать/скачивать заново!":
+        "Model weights and container disks will have to be re-created/re-downloaded!",
+    "⚠ Среди целей есть данные (не кэш): веса моделей и диски контейнеров будут удалены!":
+        "⚠ Some targets are data (not cache): model weights and container disks will be deleted!",
+    "Пропущены опасные цели (веса моделей, диски VM): {n}. "
+    "Флаг --dangerous включит их в очистку.":
+        "Skipped dangerous targets (model weights, VM disks): {n}. "
+        "The --dangerous flag includes them in the cleanup.",
+    "это данные, а не кэш — clean пропустит их без --dangerous":
+        "this is data, not cache — clean skips it without --dangerous",
+
+    # ---- v2.2: описания профилей (обновлённый dev) ----
+    "+ Xcode, симуляторы, brew, pip/npm/go/cargo/gradle, IDE, Docker, "
+    "веса ИИ-моделей (⚠ отдельно)":
+        "+ Xcode, simulators, brew, pip/npm/go/cargo/gradle, IDEs, Docker, "
+        "AI model weights (⚠ opt-in)",
+
+    # ---- v2.2: APFS-снапшоты ----
+    "APFS-снапшоты": "APFS snapshots",
+    " локальные снапшоты тома / ": " local snapshots of volume / ",
+    "Локальные снапшоты APFS": "Local APFS snapshots",
+    "Доступно только на macOS (tmutil).": "Available on macOS only (tmutil).",
+    "читаю локальные снапшоты APFS…": "reading local APFS snapshots…",
+    "нажмите «r», чтобы прочитать список": "press “r” to read the list",
+    "Локальных снапшотов нет — место не «зависло».":
+        "No local snapshots — the space is not “stuck”.",
+    "Почистили кэши, а Finder показывает то же свободное место?":
+        "Cleaned the caches but Finder still shows the same free space?",
+    "Виноваты локальные снапшоты APFS: они удерживают удалённые блоки данных.":
+        "Local APFS snapshots are to blame: they hold the deleted data blocks.",
+    "Найдено снапшотов: {n}": "Snapshots found: {n}",
+    "Снапшотов: {n}": "Snapshots: {n}",
+    "Удаление снапшотов требует sudo и необратимо: это точки восстановления Time Machine.":
+        "Deleting snapshots requires sudo and is irreversible: these are Time Machine restore points.",
+    "Удалить снапшотов: {n}?": "Delete {n} snapshot(s)?",
+    "Это НЕОБРАТИМО: снапшоты — точки восстановления Time Machine на этом томе.":
+        "This is IRREVERSIBLE: snapshots are Time Machine restore points on this volume.",
+    "Место освободится сразу после удаления.":
+        "The space is freed immediately after deletion.",
+    "Удалено снапшотов: {ok} из {n}": "Deleted snapshots: {ok} of {n}",
+    "Удалить ВСЕ локальные снапшоты? Это необратимо.":
+        "Delete ALL local snapshots? This is irreversible.",
+    "sudo недоступен — снапшоты не удалить":
+        "sudo unavailable — cannot delete snapshots",
+    "Снапшоты удерживают удалённые блоки: очистка кэшей без их удаления может «не освободить» место.":
+        "Snapshots hold deleted blocks: cache cleaning without removing them may “not free” any space.",
+    "На {name} это частая причина «иллюзии свободного места».":
+        "On {name} this is a frequent cause of the “free space illusion”.",
+    "неверный формат даты снапшота": "invalid snapshot date format",
+
+    # ---- v2.2: автоочистка по расписанию (launchd) ----
+    "Автоочистка по расписанию": "Scheduled cleanup",
+    "автоочистка по расписанию": "scheduled cleanup",
+    "launchd-агент: еженедельная уборка без терминала":
+        "launchd agent: weekly cleanup without opening a terminal",
+    " launchd-агент еженедельной очистки ": " launchd agent for weekly cleanup ",
+    " Параметры ": " Parameters ",
+    "Агент: {path}": "Agent: {path}",
+    "Статус: ": "Status: ",
+    "установлен": "installed",
+    "не установлен": "not installed",
+    "Загружен в launchd: ": "Loaded in launchd: ",
+    "да": "yes",
+    "нет": "no",
+    "Отчёт: {path}": "Report: {path}",
+    "Последний отчёт: {ago}": "Last report: {ago}",
+    "Когда: ": "When: ",
+    "Профиль: ": "Profile: ",
+    "Запуск: ": "Runner: ",
+    "воскресенье": "Sunday", "понедельник": "Monday", "вторник": "Tuesday",
+    "среда": "Wednesday", "четверг": "Thursday", "пятница": "Friday",
+    "суббота": "Saturday",
+    "Агент запускает maccc clean --profile {p} -y (всё в Корзину, без sudo, без внешних команд).":
+        "The agent runs maccc clean --profile {p} -y (everything to Trash, no sudo, no external commands).",
+    "Тихий отчёт каждого запуска пишется в ~/.mac_tweaker/scheduled.log":
+        "A silent report of each run is written to ~/.mac_tweaker/scheduled.log",
+    "— день недели / час / профиль": "— weekday / hour / profile",
+    "— создать или удалить агент": "— create or remove the agent",
+    "Создать агент {label}?": "Create the agent {label}?",
+    "Каждый {weekday} в {hour:02d}:{minute:02d}: очистка профиля «{profile}», всё в Корзину, отчёт в ~/.mac_tweaker/":
+        "Every {weekday} at {hour:02d}:{minute:02d}: cleanup of profile “{profile}”, everything to Trash, report in ~/.mac_tweaker/",
+    "Файл: ~/Library/LaunchAgents/{label}.plist":
+        "File: ~/Library/LaunchAgents/{label}.plist",
+    "создать": "create",
+    "Удалить агент и снять его с launchd?":
+        "Remove the agent and unload it from launchd?",
+    "агент установлен: очистка профиля «{profile}» каждые {weekday} в {hour:02d}:{minute:02d}":
+        "agent installed: profile “{profile}” cleanup every {weekday} at {hour:02d}:{minute:02d}",
+    "агент удалён и снят с launchd": "agent removed and unloaded from launchd",
+    "агент не установлен": "agent not installed",
+    "plist создан, но launchctl недоступен — загрузите вручную: launchctl load {path}":
+        "plist created but launchctl unavailable — load manually: launchctl load {path}",
+    "не найден запускаемый скрипт MacCC — установите бандл или запустите генерацию из каталога проекта":
+        "MacCC runner script not found — install the bundle or run the generator from the project directory",
+    "не удалось записать plist: {err}": "could not write the plist: {err}",
+    "не удалось удалить plist: {err}": "could not remove the plist: {err}",
+    "Статус обновлён": "Status refreshed",
+    "ошибок": "errors",
+
+    # ---- v2.2: новые твики macOS 13–15 ----
+    "Новые фичи macOS": "New macOS features",
+    "Stage Manager": "Stage Manager",
+    "Группировка окон слева; Ventura (13) и новее":
+        "Window grouping on the left; Ventura (13) and newer",
+    "Скрыть виджеты на рабочем столе": "Hide desktop widgets",
+    "Виджеты останутся в Центре уведомлений; Sonoma (14) и новее":
+        "Widgets stay in Notification Center; Sonoma (14) and newer",
+    "Рабочий стол: только в Stage Manager": "Reveal desktop: Stage Manager only",
+    "Клик по обоям не раздвигает окна; Sonoma (14) и новее":
+        "Clicking the wallpaper does not part the windows; Sonoma (14) and newer",
+    "Отключить iPhone Mirroring": "Disable iPhone Mirroring",
+    "Запрет зеркалирования экрана iPhone; Sequoia (15), экспериментально":
+        "Blocks iPhone screen mirroring; Sequoia (15), experimental",
 }
 
 # Служебные строки, которые встречаются в данных как части фраз

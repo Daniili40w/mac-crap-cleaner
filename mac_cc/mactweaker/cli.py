@@ -9,6 +9,8 @@ mactweaker.cli — субкоманды для работы без псевдо�
     mac_tweaker.py startup [list|disable|enable|restore|dead] [--label X]
     mac_tweaker.py tweaks  [list|apply|revert|export|import] [--id X]
     mac_tweaker.py disk    [--min-mb 500]
+    mac_tweaker.py snapshots [--delete-all] [-y] [--sudo]
+    mac_tweaker.py schedule [status|install|uninstall] [--weekday 0 --hour 4]
 """
 
 from __future__ import annotations
@@ -19,10 +21,11 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
-from . import junk, leftovers, startup, system, tweaks
+from . import junk, leftovers, osprofile, schedule, startup, system, tweaks
 from .i18n import resolve_lang, tr
-from .safety import (Deleter, Journal, Paths, ago, human, is_root, run,
-                     safe_exists, sudo_ok)
+from .safety import (Deleter, Journal, Paths, ago, human, is_root,
+                     permission_warnings, reset_denied, run, safe_exists,
+                     sudo_ok)
 from .i18n import get_lang
 from .ui import Theme, detect_theme
 
@@ -35,6 +38,16 @@ def _print_head(title: str, th: Theme) -> None:
     print()
     print(th.bold + th.b_cyan + f"── {tr(title)} " + th.reset +
           th.dim + "─" * max(0, 62 - len(title)) + th.reset)
+
+
+def _warn_denied(paths: Paths) -> None:
+    """Если сканер упёрся в TCC — явно сказать, что нужен Full Disk Access."""
+    warns = permission_warnings(paths)
+    if not warns:
+        return
+    print("\n  ! " + tr("Нет прав на сканирование {n} каталогов: {ex}").format(
+        n=len(warns), ex=", ".join(warns)), file=sys.stderr)
+    print("    " + osprofile.fda_hint(), file=sys.stderr)
 
 
 def _confirm(question: str, assume_yes: bool, default: bool = False) -> bool:
@@ -84,6 +97,18 @@ def cmd_info(args) -> int:
     _print_head(tr(" Система ").strip(), detect_theme(args.ascii, args.no_color))
     for ln in si.summary_lines():
         print("  " + ln)
+    feats = osprofile.get_os_features(arch=si.arch)
+    import os as _os
+    if feats.major and (si.is_darwin or _os.environ.get("MACTWEAKER_MACOS_MAJOR")):
+        extra = ""
+        if not feats.supports_intel:
+            extra = "  •  " + tr("только Apple Silicon")
+        if feats.needs_snapshot_check:
+            extra += "  •  " + tr("проверьте APFS-снапшоты (maccc snapshots)")
+        print("  " + tr("Профиль ОС: {name} ({major})").format(
+            name=feats.name, major=feats.major) + extra)
+    if si.full_disk_access is False:
+        print("  ! " + tr("Нет Full Disk Access: ") + osprofile.fda_hint())
     _print_head(tr(" Крупнейшие каталоги дома ").strip(),
                 detect_theme(args.ascii, args.no_color))
     for p, size in system.top_level_sizes(paths.home, 12):
@@ -94,6 +119,7 @@ def cmd_info(args) -> int:
 def cmd_scan(args) -> int:
     paths = _get_paths(args)
     th = detect_theme(args.ascii, args.no_color)
+    reset_denied()
     targets = junk.scan_junk(paths, profile=args.profile,
                              older_than_days=args.older_than_days,
                              include_dirs=args.include_dir or [],
@@ -105,9 +131,14 @@ def cmd_scan(args) -> int:
         for t in by_cat[cat]:
             grand += t.size
             size_s = human(t.size) if t.kind != "command" else tr("команда")
-            print(f"  {size_s.rjust(9)}  {tr(t.name)}")
+            mark = th.b_red + "⚠ " + th.reset if t.dangerous else ""
+            print(f"  {size_s.rjust(9)}  {mark}{tr(t.name)}")
             if t.paths:
                 print(th.dim + f"             {t.preview(paths, 2)}" + th.reset)
+            if t.dangerous:
+                print(th.dim + "             " +
+                      tr("это данные, а не кэш — clean пропустит их без --dangerous")
+                      + th.reset)
     trash = junk.trash_size(paths)
     _print_head(tr("Корзина"), th)
     print(f"  {human(trash).rjust(9)}  ~/.Trash")
@@ -119,12 +150,14 @@ def cmd_scan(args) -> int:
             "profile": args.profile, "total_bytes": grand, "trash_bytes": trash,
             "targets": [{"category": t.category, "name": t.name, "bytes": t.size,
                          "files": t.files, "root_required": t.root_required,
+                         "dangerous": t.dangerous,
                          "kind": t.kind, "command": t.command,
                          "paths": [str(p) for p in t.paths[:300]]} for t in targets],
         }
         Path(args.report).write_text(json.dumps(payload, ensure_ascii=False, indent=2),
                                      encoding="utf-8")
         print(f"\n  JSON: {args.report}")
+    _warn_denied(paths)
     return 0
 
 
@@ -132,6 +165,7 @@ def cmd_clean(args) -> int:
     paths = _get_paths(args)
     th = detect_theme(args.ascii, args.no_color)
     journal = Journal(paths)
+    reset_denied()
     targets = junk.scan_junk(paths, profile=args.profile,
                              older_than_days=args.older_than_days,
                              include_dirs=args.include_dir or [],
@@ -141,17 +175,37 @@ def cmd_clean(args) -> int:
     if args.only:
         targets = [t for t in targets
                    if any(o.lower() in t.name.lower() for o in args.only)]
-    total = sum(t.size for t in targets)
+    # опасные цели (веса ИИ-моделей, диски виртуалок) чистятся ТОЛЬКО
+    # с явным флагом --dangerous: это не кэш, а данные пользователя
+    dangerous = [t for t in targets if t.dangerous]
+    if dangerous and not getattr(args, "dangerous", False):
+        print("  ! " + tr("Пропущены опасные цели (веса моделей, диски VM): {n}. "
+                           "Флаг --dangerous включит их в очистку.")
+              .format(n=len(dangerous)))
+    if getattr(args, "dangerous", False):
+        for t in dangerous:
+            t.selected = True
+    total = sum(t.size for t in targets if t.selected)
     _print_head(tr("Будет очищено"), th)
     for t in targets:
-        print(f"  {human(t.size).rjust(9)}  {tr(t.name)}")
+        if not t.selected:
+            continue
+        mark = th.b_red + "⚠ " + th.reset if t.dangerous else ""
+        print(f"  {human(t.size).rjust(9)}  {mark}{tr(t.name)}")
+    if dangerous and getattr(args, "dangerous", False):
+        print("  " + th.b_red + tr("⚠ Среди целей есть данные (не кэш): веса "
+                                    "моделей и диски контейнеров будут удалены!")
+              + th.reset)
     print(f"\n  {tr('Итого')}: {th.bold}{human(total)}{th.reset}  "
-          f"({len(targets)})  {tr('Способ: ').strip().rstrip(':')}: "
+          f"({len([t for t in targets if t.selected])})  "
+          f"{tr('Способ: ').strip().rstrip(':')}: "
           f"{tr('жёсткое (rm)') if args.hard else tr('в Корзину')}"
           f"{'  DRY-RUN' if args.dry_run else ''}")
     if not _confirm(tr("Продолжить?"), args.yes):
         print(tr("Отменено"))
+        _warn_denied(paths)
         return 1
+    targets = [t for t in targets if t.selected]
 
     need_root = any(t.root_required for t in targets)
     use_sudo = bool(args.sudo)
@@ -185,12 +239,14 @@ def cmd_clean(args) -> int:
     journal.add("clean", f"{freed} байт",
                 {"profile": args.profile, "hard": args.hard,
                  "targets": [t.name for t in targets]})
+    _warn_denied(paths)
     return 0 if errors == 0 else 1
 
 
 def cmd_deep(args) -> int:
     paths = _get_paths(args)
     th = detect_theme(args.ascii, args.no_color)
+    reset_denied()
     roots = [Path(r).expanduser() for r in (args.root or [])] or [paths.home]
     items = junk.deep_scan(paths, roots=roots, max_depth=args.depth,
                            older_than_days=args.older_than_days,
@@ -212,6 +268,7 @@ def cmd_deep(args) -> int:
             print(th.dim + f"  … ещё {len(group) - args.limit}" + th.reset)
     _print_head(tr("ИТОГО найдено"), th)
     print(f"  {th.bold}{human(grand)}{th.reset} / {len(items)}")
+    _warn_denied(paths)
 
     if not args.clean:
         return 0
@@ -235,6 +292,7 @@ def cmd_deep(args) -> int:
 def cmd_orphans(args) -> int:
     paths = _get_paths(args)
     th = detect_theme(args.ascii, args.no_color)
+    reset_denied()
     print("  " + tr("читаю реестр установленных программ…"), end="", flush=True)
     reg = leftovers.AppRegistry.build(paths, use_spotlight=not args.no_spotlight)
     print("\r  " + tr("Установлено программ: {n}").split("•")[0].strip()
@@ -477,20 +535,111 @@ def cmd_disk(args) -> int:
 
 
 def _dir_sizes_cli(root: Path, limit: int) -> List[Tuple[Path, int, bool]]:
-    from .safety import dir_size, safe_scandir
-    out: List[Tuple[Path, int, bool]] = []
+    from concurrent.futures import ThreadPoolExecutor
+    from .safety import dir_size, safe_scandir, workers
+    tasks: List[Tuple[Path, bool]] = []
     for e in safe_scandir(root):
         try:
             p = Path(e.path)
             if e.is_symlink():
                 continue
-            isdir = e.is_dir(follow_symlinks=False)
-            size = dir_size(p)[0] if isdir else e.stat().st_size
-            out.append((p, size, isdir))
+            tasks.append((p, e.is_dir(follow_symlinks=False)))
         except OSError:
             continue
+
+    def measure(item: Tuple[Path, bool]) -> Tuple[Path, int, bool]:
+        p, isdir = item
+        try:
+            size = dir_size(p)[0] if isdir else p.stat().st_size
+        except OSError:
+            size = 0
+        return (p, size, isdir)
+
+    out: List[Tuple[Path, int, bool]] = []
+    n = max(1, min(workers(), len(tasks) or 1))
+    if n == 1 or not tasks:
+        out = [measure(t) for t in tasks]
+    else:
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            out = list(ex.map(measure, tasks))
     out.sort(key=lambda x: -x[1])
     return out[:limit]
+
+
+def cmd_snapshots(args) -> int:
+    paths = _get_paths(args)
+    th = detect_theme(args.ascii, args.no_color)
+    _print_head(tr("Локальные снапшоты APFS"), th)
+    if not osprofile.snapshots_supported():
+        print("  " + tr("Доступно только на macOS (tmutil)."))
+        return 0
+    dates = osprofile.list_local_snapshots(args.volume)
+    if not dates:
+        print("  " + tr("Локальных снапшотов нет — место не «зависло»."))
+        return 0
+    feats = osprofile.get_os_features()
+    print(f"  {tr('Найдено снапшотов: {n}').format(n=len(dates))}")
+    for d in dates:
+        print(f"    com.apple.TimeMachine.{d}.local")
+    print("  " + th.dim + tr("Снапшоты удерживают удалённые блоки: очистка кэшей "
+                              "без их удаления может «не освободить» место.")
+          + th.reset)
+    if feats.needs_snapshot_check:
+        print("  " + th.dim + tr("На {name} это частая причина «иллюзии "
+                                 "свободного места».").format(name=feats.name)
+              + th.reset)
+    if not args.delete_all:
+        return 0
+    if not args.yes and not _confirm(
+            tr("Удалить ВСЕ локальные снапшоты? Это необратимо."), False):
+        print(tr("Отменено"))
+        return 1
+    use_sudo = bool(args.sudo)
+    if use_sudo and not sudo_ok(non_interactive=True):
+        run(["sudo", "-v"], timeout=120)
+        use_sudo = sudo_ok(non_interactive=True)
+    ok = errs = 0
+    for d in dates:
+        good, msg = osprofile.delete_local_snapshot(d, use_sudo=use_sudo)
+        print(("  " + th.green + "✓ " if good else "  " + th.red + "✗ ")
+              + th.reset + f"{d}: {msg}")
+        ok += 1 if good else 0
+        errs += 0 if good else 1
+    print(f"  {tr('Удалено снапшотов: {ok} из {n}').format(ok=ok, n=len(dates))}")
+    return 0 if errs == 0 else 1
+
+
+def cmd_schedule(args) -> int:
+    paths = _get_paths(args)
+    th = detect_theme(args.ascii, args.no_color)
+    action = args.action
+    if action == "status":
+        _print_head(tr("Автоочистка по расписанию"), th)
+        st = schedule.agent_status(paths)
+        for ln in st.summary(paths):
+            print("  " + ln)
+        print("  " + th.dim + tr("Запуск: ") + (st.runner or "—") + th.reset)
+        return 0
+    if action == "install":
+        ok, msg = schedule.install_agent(paths, profile=args.profile,
+                                         weekday=args.weekday, hour=args.hour,
+                                         minute=args.minute)
+        print(("  " + th.green + "✓ " if ok else "  " + th.red + "✗ ")
+              + th.reset + msg)
+        if ok:
+            print("  " + th.dim + tr("Отчёт: {path}").format(
+                path=paths.short(schedule.report_path(paths))) + th.reset)
+        return 0 if ok else 1
+    if action == "uninstall":
+        if not args.yes and not _confirm(
+                tr("Удалить агент и снять его с launchd?"), False):
+            print(tr("Отменено"))
+            return 1
+        ok, msg = schedule.uninstall_agent(paths)
+        print(("  " + th.green + "✓ " if ok else "  " + th.red + "✗ ")
+              + th.reset + msg)
+        return 0 if ok else 1
+    return 2
 
 
 def cmd_undo(args) -> int:
@@ -540,6 +689,8 @@ def build_parser() -> argparse.ArgumentParser:
   mac_tweaker.py startup disable --label adobe -y
   mac_tweaker.py tweaks list | grep ВКЛ
   mac_tweaker.py disk --min-mb 1000
+  mac_tweaker.py snapshots                    # куда «пропало» свободное место
+  mac_tweaker.py schedule install --hour 4    # еженедельная автоочистка
 """)
     from . import __version__ as _version
     ap.add_argument("--version", action="version",
@@ -589,6 +740,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-commands", action="store_true",
                     help="не вызывать brew/docker/npm")
     sp.add_argument("--empty-trash", action="store_true", help="очистить Корзину")
+    sp.add_argument("--dangerous", action="store_true",
+                    help="включить опасные цели: веса ИИ-моделей, диски "
+                         "Docker/OrbStack (не кэш — данные!)")
     common(sp)
     sp.set_defaults(func=cmd_clean)
 
@@ -652,6 +806,30 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=int, default=60)
     common(sp, sudo=False, hard=False)
     sp.set_defaults(func=cmd_undo)
+
+    sp = sub.add_parser("snapshots",
+                        help="локальные снапшоты APFS (иллюзия свободного места)")
+    sp.add_argument("--volume", default="/", help="том (по умолчанию /)")
+    sp.add_argument("--delete-all", action="store_true",
+                    help="удалить все локальные снапшоты (необратимо)")
+    sp.add_argument("-y", "--yes", action="store_true",
+                    help="не спрашивать подтверждение")
+    sp.add_argument("--sudo", action="store_true",
+                    help="использовать sudo (обычно требуется)")
+    sp.set_defaults(func=cmd_snapshots)
+
+    sp = sub.add_parser("schedule",
+                        help="launchd-агент еженедельной автоочистки")
+    sp.add_argument("action", nargs="?", default="status",
+                    choices=("status", "install", "uninstall"))
+    sp.add_argument("--profile", choices=junk.PROFILES, default="basic")
+    sp.add_argument("--weekday", type=int, default=0,
+                    help="день недели: 0=воскресенье … 6=суббота")
+    sp.add_argument("--hour", type=int, default=4, help="час запуска (0-23)")
+    sp.add_argument("--minute", type=int, default=0, help="минута запуска (0-59)")
+    sp.add_argument("-y", "--yes", action="store_true",
+                    help="не спрашивать подтверждение")
+    sp.set_defaults(func=cmd_schedule)
 
     return ap
 

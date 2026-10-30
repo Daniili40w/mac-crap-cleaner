@@ -113,4 +113,21 @@ mkdir -p "$S/Library/LaunchDaemons"
 make_plist "$S/Library/LaunchDaemons/com.removed.daemon.plist" \
            "com.removed.daemon" "/usr/local/bin/removed-daemon" "true"
 
+# --- v2.2: современные пожиратели места и «сирота» Electron-приложения ---
+mkdir -p "$H/.ollama/models/blobs" "$H/.orbstack/data" "$H/.lmstudio/models/m1"
+dd if=/dev/zero of="$H/.ollama/models/blobs/sha256-abc" bs=1M count=6 status=none
+dd if=/dev/zero of="$H/.orbstack/data/disk.img" bs=1M count=3 status=none
+dd if=/dev/zero of="$H/.lmstudio/models/m1/model.gguf" bs=1M count=2 status=none
+# профиль Electron-приложения GhostedApp (само приложение удалено)
+G="$H/Library/Application Support/GhostedApp"
+mkdir -p "$G/GPUCache" "$G/Local Storage/leveldb" "$G/Session Storage"
+echo '{}' > "$G/Preferences"
+dd if=/dev/zero of="$G/Local Storage/leveldb/x.ldb" bs=1k count=50 status=none
+# групповой контейнер ЖИВОГО приложения (не должен попасть в сироты)
+mkdir -p "$H/Library/Group Containers/ABCDE12345.com.example.mytool"
+echo data > "$H/Library/Group Containers/ABCDE12345.com.example.mytool/store.db"
+# кэш внутри песочного контейнера (защищённая зона, но чистить разрешено)
+mkdir -p "$H/Library/Containers/com.example.sandboxed/Data/Library/Caches/tmp"
+dd if=/dev/zero of="$H/Library/Containers/com.example.sandboxed/Data/Library/Caches/tmp/x" bs=1k count=100 status=none
+
 echo "$ROOT"

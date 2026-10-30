@@ -47,6 +47,7 @@ class SystemInfo:
     has_sudo: bool = False
     homebrew: bool = False
     xcode_cli: bool = False
+    full_disk_access: Optional[bool] = None   # None — не macOS/не определили
     disks: List[DiskInfo] = field(default_factory=list)
 
     @property
@@ -92,6 +93,9 @@ class SystemInfo:
             extras.append("Xcode CLT")
         extras.append(f"Python {self.python}")
         lines.append("  •  ".join(extras))
+        if self.full_disk_access is False:
+            lines.append(tr("⚠ нет Full Disk Access: защищённые каталоги "
+                            "(Mail, Messages…) будут пропущены"))
         return lines
 
 
@@ -202,6 +206,11 @@ def collect(paths: Optional[Paths] = None) -> SystemInfo:
     si.has_sudo = sudo_ok(non_interactive=True)
     si.homebrew = Path("/opt/homebrew/bin/brew").exists() or \
         Path("/usr/local/bin/brew").exists()
+    if si.is_darwin:
+        # явная проверка прав (TCC): без Full Disk Access часть каталогов
+        # молча пропускается — лучше сказать об этом пользователю сразу
+        from . import osprofile
+        si.full_disk_access = osprofile.has_full_disk_access(paths)
 
     seen = set()
     for mount in (str(paths.home), "/"):
@@ -225,20 +234,43 @@ def _parse_boottime(out: str) -> float:
 
 def top_level_sizes(root: Path, limit: int = 12,
                     progress=None) -> List[Tuple[Path, int]]:
-    """Крупнейшие подкаталоги первого уровня (для экрана «Анализ диска»)."""
-    from .safety import dir_size, safe_scandir
-    out: List[Tuple[Path, int]] = []
+    """Крупнейшие подкаталоги первого уровня (для экрана «Анализ диска»).
+
+    Размеры считаются параллельно (ThreadPoolExecutor) — на APFS это
+    основная по времени операция.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from .safety import dir_size, safe_scandir, workers
     entries = safe_scandir(Path(root))
-    for i, e in enumerate(entries):
-        if progress:
-            progress(i, len(entries), e.name)
+    tasks: List[Path] = []
+    sizes: List[Tuple[Path, int]] = []
+    for e in entries:
         try:
             if e.is_symlink():
                 continue
-            p = Path(e.path)
-            size = dir_size(p)[0] if p.is_dir() else e.stat().st_size
-            out.append((p, size))
+            tasks.append(Path(e.path))
         except OSError:
             continue
+
+    def measure(p: Path) -> Tuple[Path, int]:
+        try:
+            size = dir_size(p)[0] if p.is_dir() else p.stat().st_size
+        except OSError:
+            size = 0
+        return (p, size)
+
+    n = max(1, min(workers(), len(tasks) or 1))
+    if n == 1 or not tasks:
+        for i, p in enumerate(tasks):
+            if progress:
+                progress(i, len(tasks), p.name)
+            sizes.append(measure(p))
+    else:
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            for i, res in enumerate(ex.map(measure, tasks)):
+                if progress:
+                    progress(i, len(tasks), res[0].name)
+                sizes.append(res)
+    out = list(sizes)
     out.sort(key=lambda x: -x[1])
     return out[:limit]
