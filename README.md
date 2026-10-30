@@ -12,26 +12,71 @@ mac_tweaker/
 ├── build_bundle.py       # builds a single file: dist/maccc_bundle.py
 ├── mactweaker/
 │   ├── __init__.py
-│   ├── safety.py         # safeguards, stat wrappers, Trash, journal
+│   ├── safety.py         # safeguards, stat wrappers, Trash, journal, TCC tracking
+│   ├── osprofile.py      # per-version macOS profile: features, paths, FDA, APFS snapshots
 │   ├── system.py         # system and disk information
-│   ├── junk.py           # caches + deep junk scan
-│   ├── leftovers.py      # leftovers of removed apps ("orphans")
+│   ├── junk.py           # caches + deep junk scan (parallel traversal)
+│   ├── leftovers.py      # leftovers of removed apps ("orphans", incl. Electron/Tauri)
 │   ├── startup.py        # LaunchAgents / LaunchDaemons / Login Items / BTM
-│   ├── tweaks.py         # settings via defaults (reversible)
+│   ├── schedule.py       # launchd agent for weekly automatic cleanup
+│   ├── tweaks.py         # settings via defaults (reversible, version-gated)
 │   ├── ui.py             # TUI engine (pure render functions)
 │   ├── app.py            # screens and the main loop
 │   └── cli.py            # subcommands for scripts and cron
 └── tests/
     ├── make_fake_home.sh # test bench: a fake macOS home tree
-    ├── test_all.py       # 185 checks (logic + CLI + rendering)
-    ├── test_tui_pty.py   # 18 checks: the TUI in a real pty
+    ├── test_all.py       # 346 checks (logic + CLI + rendering)
+    ├── test_tui_pty.py   # 27 checks: the TUI in a real pty
     └── render_preview.py # renders screens to text/HTML
 ```
+
+## macOS version compatibility
+
+The tool reads the macOS version once at startup (`platform.mac_ver()`) and builds
+an `OSFeatures` profile — every scanner takes ready-made paths and flags from it
+instead of scattering `if/else` checks around:
+
+| macOS | What the profile changes |
+| --- | --- |
+| Ventura (13) | startup items are managed through Background Task Management |
+| Sonoma (14) | desktop-widget caches; Stage Manager / widget tweaks unlocked |
+| Sequoia (15) | iPhone Mirroring control; stricter TCC taken into account |
+| Tahoe (26) | Apple Intelligence model caches (⚠ opt-in only); APFS-snapshot check — the usual cause of the "cleaned 10 GB but Finder shows nothing" illusion |
+| Golden Gate (27) | Intel is gone: Rosetta/x86 checks are skipped; extra AI-weight storages |
+
+* **Full Disk Access is checked explicitly.** If the terminal has no FDA, the tool
+  does not silently skip `~/Library/Mail` & co.: every `PermissionError` is recorded
+  and the TUI/CLI prints "No permission to scan X — grant Full Disk Access" with the
+  exact System Settings path.
+* **APFS snapshots (key `S` / `maccc snapshots`).** Lists local snapshots via
+  `tmutil listlocalsnapshots /` and offers to delete stale ones — otherwise cache
+  cleaning appears to free nothing.
+* **Modern space hogs, opt-in.** Ollama (`~/.ollama/models`), LM Studio, OrbStack,
+  Docker Desktop VM disks and HuggingFace hub caches are found by the `dev` profile,
+  marked ⚠ **dangerous**, never pre-selected, and require an explicit confirmation:
+  these are model weights and container images, not caches.
+* **Parallel traversal.** Directory reading and size measurement run in a
+  `concurrent.futures.ThreadPoolExecutor` (standard library — still zero
+  dependencies), so APFS volumes with millions of small files no longer freeze the UI.
+* **Tweaks revised for macOS 14/15.** Dead `defaults write` switches were removed;
+  new ones added: Stage Manager, hide desktop widgets, "click wallpaper to reveal
+  desktop", disable iPhone Mirroring. Each tweak is version-gated and hidden on
+  systems where it does nothing.
+* **Smarter orphans.** Electron/Tauri apps often leave profiles with incomplete
+  `Info.plist`: a folder in Application Support is now recognized by its structure
+  (GPUCache, Local Storage, …) and marked ORPHAN when the app is gone. Group
+  Containers are matched by id prefix, so `group.com.docker` is no longer a false
+  orphan when `com.docker.docker` is installed.
+* **Scheduled cleanup (launchd).** Menu item "9" / `maccc schedule install`
+  generates `~/Library/LaunchAgents/com.dan1lazz.maccc.plist`: a weekly run of the
+  basic profile, everything to Trash, no sudo, silent report in
+  `~/.mac_tweaker/scheduled.log`.
 
 ## Table of contents
 
 - [Languages: RU / EN](#languages-ru--en)
 - [Quick start](#quick-start)
+- [macOS version compatibility](#macos-version-compatibility)
 - [Text user interface](#text-user-interface)
 - [Screens](#screens)
 - [CLI mode](#cli-mode-for-cron-ssh-and-scripts)
@@ -241,6 +286,14 @@ Shows the largest folders with bar indicators. `Enter` goes into a folder, `Back
 
 All actions are written to `~/.mac_tweaker/journal-<date>.jsonl`. `u` restores everything deleted in the current session from the Trash, and `Backspace` restores all disabled startup items.
 
+### 8. APFS snapshots (key `S`)
+
+Opens from the main menu or the system info screen. Answers the Tahoe-era question "I cleaned 10 GB of caches, why is the free space the same?": local APFS snapshots hold the deleted blocks. The screen lists snapshots (`tmutil listlocalsnapshots /`) and deletes the selected ones (`d`) or all of them (`x`, requires sudo, irreversible).
+
+### 9. Scheduled cleanup (launchd)
+
+Generates `~/Library/LaunchAgents/com.dan1lazz.maccc.plist`: a weekly run of the chosen profile, everything to the Trash, no sudo, silent report in `~/.mac_tweaker/scheduled.log`. `w`/`h`/`p` pick the weekday, hour and profile; `Enter` installs, `d` removes the agent.
+
 ---
 
 ## CLI mode (for cron, ssh and scripts)
@@ -287,6 +340,20 @@ python3 maccc.py tweaks export
 # journal
 python3 maccc.py undo --list
 python3 maccc.py undo -y                              # restore from Trash
+
+# APFS snapshots ("cleaned caches but no free space?" — this is why)
+python3 maccc.py snapshots                            # list local snapshots
+python3 maccc.py snapshots --delete-all --sudo -y     # delete them (irreversible)
+
+# scheduled cleanup via launchd
+python3 maccc.py schedule status
+python3 maccc.py schedule install --weekday 0 --hour 4   # Sundays 04:00, basic profile
+python3 maccc.py schedule install --profile dev --weekday 3 --hour 5
+python3 maccc.py schedule uninstall -y
+
+# dangerous targets (AI model weights, Docker/OrbStack VM disks) are skipped
+# by default; opt in explicitly:
+python3 maccc.py clean --profile dev --dangerous -y
 ```
 
 Without a TTY (pipe, cron) a plain text menu is used automatically instead of the TUI.
@@ -335,7 +402,7 @@ for p in ("/tmp/fake_mac/home/Library/Application Support/RemovedApp",
     os.path.exists(p) and os.utime(p, (old, old))
 PY
 
-# 3. run the 185 checks
+# 3. run the 346 checks
 HOME=/tmp/fake_mac/home \
 MACTWEAKER_HOME=/tmp/fake_mac/home \
 MACTWEAKER_SYSROOT=/tmp/fake_mac/sys \
@@ -350,7 +417,7 @@ open /tmp/preview/preview.html
 # 5. build the single-file bundle
 python3 build_bundle.py && python3 dist/maccc_bundle.py --version
 
-# 6. run the TUI in a real pseudo-terminal (18 checks)
+# 6. run the TUI in a real pseudo-terminal (27 checks)
 chmod -R a+rwX /tmp/fake_mac
 HOME=/tmp/fake_mac/home MACTWEAKER_HOME=/tmp/fake_mac/home \
 MACTWEAKER_SYSROOT=/tmp/fake_mac/sys \
@@ -422,15 +489,34 @@ If you run `maccc_bundle.py` manually in a small window (80x24), the program tri
 
 ## Scheduled cleaning (launchd)
 
+Since 2.2 the agent is generated by the tool itself — in the TUI use menu item
+**"9. Scheduled cleanup"** (Enter to install, `w`/`h`/`p` for weekday/hour/profile,
+`d` to remove), or from the CLI:
+
+```bash
+python3 maccc.py schedule install --weekday 0 --hour 4   # Sundays at 04:00
+python3 maccc.py schedule status
+python3 maccc.py schedule uninstall -y
+```
+
+The generator writes `~/Library/LaunchAgents/com.dan1lazz.maccc.plist` and loads
+it via `launchctl bootstrap` (falling back to `launchctl load`). By default it
+runs `clean --profile basic --older-than-days 30 --no-commands -y` once a week
+and writes a silent report of every run to `~/.mac_tweaker/scheduled.log`.
+The schedule never uses `sudo` (no terminal for a password), never uses `--hard`
+(everything goes to the Trash) and never touches "dangerous" targets (model
+weights, VM disks). CPU/IO priority is lowered (`Nice`, `LowPriorityIO`,
+`ProcessType=Background`) so the cleanup stays out of the way.
+
+The manual template is still available:
+
 ```bash
 cp com.user.maccrapcleaner.plist ~/Library/LaunchAgents/
 # edit USERNAME in the paths, then:
 launchctl load ~/Library/LaunchAgents/com.user.maccrapcleaner.plist
-launchctl list | grep mactweaker
-cat ~/Library/Logs/mac_crap_cleaner.log
+launchctl list | grep maccrapcleaner
+tail -f ~/Library/Logs/mac_crap_cleaner.log
 ```
-
-The default schedule runs `clean --profile dev --older-than-days 30 -y` every Sunday at 04:00. The schedule does not use `sudo` (there is no terminal to enter a password) and does not use `--hard`, so everything goes to the Trash.
 
 ---
 

@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Системный мусор
+.DS_Store
+._*
+Thumbs.db
+
+# Локальные данные утилиты и логи
+*.log
+.mac_tweaker/
+
+# Настройки редакторов
+.vscode/
+.idea/
+*.swp
+
+# Артефакты сборки (.app / бандл собираются локально)
+build/
+dist/

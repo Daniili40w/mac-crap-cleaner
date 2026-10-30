@@ -23,10 +23,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import junk, leftovers, startup, system, tweaks
+from . import junk, leftovers, osprofile, schedule, startup, system, tweaks
 from .i18n import APP_SHORT, APP_TITLE, get_lang, set_lang, tr
-from .safety import (Deleter, Journal, Paths, ago, dir_size, human, run,
-                     safe_scandir, sudo_ok)
+from .safety import (Deleter, Journal, Paths, ago, dir_size, human,
+                     permission_warnings, reset_denied, run, safe_scandir,
+                     sudo_ok)
 from .ui import (Dialog, Key, ListView, Painter, RenderContext, Row, Screen,
                  Terminal, Theme, dwidth, pad, truncate)
 
@@ -81,6 +82,7 @@ d                отключить отмеченное (автозагрузк
 e                включить отмеченное
 u                откатить последнее действие
 i                переключить фильтр/режим
+S                локальные снапшоты APFS (из главного меню и «о системе»)
 Tab              переключить режим (профиль, жёсткое удаление…)
 ?  F1            эта справка
 Esc  q           назад / выход
@@ -89,6 +91,10 @@ Esc  q           назад / выход
 ────────────
 По умолчанию всё удаляется В КОРЗИНУ — действие обратимо.
 Жёсткое удаление (rm) включается отдельно и спрашивает подтверждение.
+Цели с меткой ⚠ (веса ИИ-моделей, диски Docker/OrbStack) — НЕ кэш:
+они не отмечаются автоматически и требуют отдельного подтверждения.
+Если у терминала нет Full Disk Access, утилита честно пишет в статус
+«Нет прав на сканирование …» вместо молчаливого пропуска каталогов.
 Скрипт никогда не трогает: ~/Documents, ~/Desktop, ~/Pictures, Keychains,
 Mail, Messages, ~/Library/Containers (кроме подкаталога Caches),
 /System, /usr, /etc, ~/.ssh, ~/.gnupg и каталоги DataVault (SIP/TCC).
@@ -99,8 +105,21 @@ Mail, Messages, ~/Library/Containers (кроме подкаталога Caches),
 Профили очистки
 ───────────────
 basic       кэши пользователя и системы, логи, crash-отчёты, savedState
-dev         + Xcode, симуляторы, brew, pip/npm/go/cargo/gradle, IDE, Docker
+dev         + Xcode, симуляторы, brew, pip/npm/go/cargo/gradle, IDE, Docker,
+            Ollama/LM Studio/OrbStack/HuggingFace (⚠ под подтверждением)
 aggressive  + кэши браузеров, мессенджеров, облачных клиентов, Adobe
+
+Автоочистка по расписанию
+─────────────────────────
+Пункт меню «9» создаёт launchd-агент com.dan1lazz.maccc.plist: раз в
+неделю запускается очистка выбранного профиля (всё в Корзину, без sudo),
+тихий отчёт пишется в ~/.mac_tweaker/scheduled.log.
+
+APFS-снапшоты (клавиша S)
+─────────────────────────
+Очистка кэшей иногда «не освобождает» место — особенно на macOS Tahoe:
+его держат локальные снапшоты APFS. Экран показывает список снапшотов
+(tmutil) и удаляет выбранные — место освобождается сразу.
 
 Экран «Остатки программ»
 ────────────────────────
@@ -215,6 +234,20 @@ class App:
 
     def say(self, text: str, kind: str = "info") -> None:
         self.status, self.status_kind = text, kind
+
+    # -- права доступа (TCC / Full Disk Access) --
+    def begin_scan(self) -> None:
+        """Сбросить реестр отказов доступа перед новым сканом."""
+        reset_denied()
+
+    def report_denials(self) -> None:
+        """Если сканер упёрся в TCC — честно сказать об этом в статусе."""
+        warns = permission_warnings(self.paths)
+        if warns:
+            self.say(tr("Нет прав на сканирование {n} каталогов: {ex}. "
+                        "Выдайте терминалу Полный доступ к диску (FDA)")
+                     .format(n=len(warns), ex=", ".join(warns)), "warn")
+        return None
 
     # -- отрисовка кадра --
     def frame(self, screen: Screen, ctx: RenderContext) -> List[str]:
@@ -410,8 +443,9 @@ s                  scan
 x                  run the action on selected items
 d                  disable selected (startup items)
 e                  enable selected
-u                  undo the last action
+u                undo the last action
 i  p  o            filters, profile, age threshold
+S                local APFS snapshots (from the main menu / system info)
 b                  large files (Disk analysis screen)
 Tab                switch delete mode (Trash ↔ rm)
 l                  switch language (Russian / English)
@@ -422,6 +456,10 @@ Safety
 ──────
 By default everything is moved TO THE TRASH — the action is reversible.
 Hard deletion (rm) is opt-in and asks for a separate confirmation.
+Targets marked ⚠ (AI model weights, Docker/OrbStack VM disks) are NOT
+caches: they are never pre-selected and require an explicit confirmation.
+If the terminal lacks Full Disk Access, the tool says so in the status
+line instead of silently skipping protected folders.
 The tool never touches: ~/Documents, ~/Desktop, ~/Pictures, Keychains,
 Mail, Messages, ~/Library/Containers (except the Caches subfolder),
 /System, /usr, /etc, ~/.ssh, ~/.gnupg and DataVault folders (SIP/TCC).
@@ -432,8 +470,21 @@ Disabling a startup item always keeps a plist copy in
 Cleanup profiles
 ────────────────
 basic       user and system caches, logs, crash reports, savedState
-dev         + Xcode, simulators, brew, pip/npm/go/cargo/gradle, IDEs, Docker
+dev         + Xcode, simulators, brew, pip/npm/go/cargo/gradle, IDEs, Docker,
+            Ollama/LM Studio/OrbStack/HuggingFace (⚠ explicit confirm)
 aggressive  + browser, messenger and cloud-client caches
+
+Scheduled cleanup
+─────────────────
+Menu item “9” creates the launchd agent com.dan1lazz.maccc.plist: once a
+week it runs the chosen cleanup profile (everything to Trash, no sudo)
+and writes a silent report to ~/.mac_tweaker/scheduled.log.
+
+APFS snapshots (key S)
+──────────────────────
+Cache cleaning sometimes “does not free space” — especially on macOS
+Tahoe: local APFS snapshots hold the deleted blocks. The screen lists
+the snapshots (tmutil) and deletes the selected ones.
 
 “Leftovers” screen
 ──────────────────
@@ -461,8 +512,8 @@ class MenuItem:
 
 class MainMenu(Screen):
     title = "главное меню"
-    hints = (("↑↓", "выбор"), ("Enter", "открыть"), ("i", "о системе"),
-             ("l", "язык"))
+    hints = (("↑↓", "выбор"), ("Enter", "открыть"), ("s", "APFS-снапшоты"),
+             ("i", "о системе"), ("l", "язык"))
 
     def __init__(self, app: App):
         super().__init__(app)
@@ -502,6 +553,9 @@ class MainMenu(Screen):
             MenuItem("8", "Справка",
                      "горячие клавиши и правила безопасности",
                      lambda a: HelpScreen(a)),
+            MenuItem("9", "Автоочистка по расписанию",
+                     "launchd-агент: еженедельная уборка без терминала",
+                     lambda a: ScheduleScreen(a)),
         ]
         rows = [Row(cells=[f"{m.key}  {self.app.p.color(tr(m.label), self.app.theme.bold)}"],
                     meta=m) for m in self.items]
@@ -588,10 +642,12 @@ class MainMenu(Screen):
         if key in (Key.ENTER, Key.RIGHT):
             item: MenuItem = self.list.current.meta
             return item.factory(self.app)
-        if key in "12345678":
+        if key in "123456789":
             idx = int(key) - 1
             if idx < len(self.items):
                 return self.items[idx].factory(self.app)
+        if key == "s":
+            return SnapshotsScreen(self.app)
         if key == "i":
             return InfoScreen(self.app)
         if key == "l":
@@ -610,7 +666,8 @@ class MainMenu(Screen):
 
 class InfoScreen(Screen):
     title = "о системе"
-    hints = (("r", "обновить"), ("t", "крупнейшие каталоги"))
+    hints = (("r", "обновить"), ("t", "крупнейшие каталоги"),
+             ("s", "APFS-снапшоты"))
 
     def __init__(self, app: App):
         super().__init__(app)
@@ -620,9 +677,18 @@ class InfoScreen(Screen):
         p, t = self.app.p, self.app.theme
         w = ctx.width
         si = self.app.refresh_sysinfo()
+        feats = osprofile.get_os_features()
         out = [p.hline(w, t.tl, t.tr, tr(" Система "))]
         for ln in si.summary_lines():
             out.append("  " + ln)
+        if feats.major:
+            out.append("  " + p.color(tr("Профиль ОС: {name} ({major})").format(
+                name=feats.name, major=feats.major), t.dim)
+                + (p.color("  •  " + tr("только Apple Silicon"), t.dim)
+                   if not feats.supports_intel else ""))
+        if si.full_disk_access is False:
+            out.append("  " + p.color(
+                tr("⚠ Нет Full Disk Access: ") + osprofile.fda_hint(), t.yellow))
         out.append(p.hline(w, t.lt, t.rt))
 
         if si.disks:
@@ -653,6 +719,8 @@ class InfoScreen(Screen):
             self.app.refresh_sysinfo()
             self.app.say(tr("Данные обновлены"), "ok")
             return None
+        if key == "s":
+            return SnapshotsScreen(self.app)
         if key == "t":
             def work(tick):
                 tick(0, 0, "считаю размеры каталогов…")
@@ -686,20 +754,29 @@ class CleanerScreen(Screen):
         self.targets: List[junk.JunkTarget] = []
         self.list = ListView(multi=True)
         self.scanned = False
+        self.perm_warn: List[str] = []
         self.columns = [(10, "right"), (-38, "left"), (-34, "left")]
 
     # -- сканирование --
     def do_scan(self) -> None:
         def work(tick):
+            self.app.begin_scan()
             self.targets = junk.scan_junk(
                 self.app.paths, profile=self.profile,
                 older_than_days=self.older_than, progress=tick)
         self.app.task("Сканирование кэшей", work)
         self.scanned = True
+        self.perm_warn = permission_warnings(self.app.paths)
         self.rebuild_rows()
         total = sum(t.size for t in self.targets if t.selected)
-        self.app.say(tr("Найдено {n} целей на {size} — отметьте нужное и нажмите «x»")
-                     .format(n=len(self.targets), size=human(total)), "info")
+        if self.perm_warn:
+            self.app.say(tr("Нет прав на сканирование {n} каталогов: {ex}. "
+                            "Выдайте терминалу Полный доступ к диску (FDA)")
+                         .format(n=len(self.perm_warn),
+                                 ex=", ".join(self.perm_warn[:2])), "warn")
+        else:
+            self.app.say(tr("Найдено {n} целей на {size} — отметьте нужное и нажмите «x»")
+                         .format(n=len(self.targets), size=human(total)), "info")
 
     def rebuild_rows(self) -> None:
         rows: List[Row] = []
@@ -712,6 +789,8 @@ class CleanerScreen(Screen):
                 name = tr(t.name)
                 if t.root_required:
                     name = self.app.p.color("⚿ ", self.app.theme.yellow) + name
+                if t.dangerous:
+                    name = self.app.p.color("⚠ ", self.app.theme.red) + name
                 note = truncate(tr(t.note), 44) if t.note else t.preview(self.app.paths, 1)
                 rows.append(Row(cells=[size_s, name, self.app.p.color(note,
                                                                       self.app.theme.dim)],
@@ -735,14 +814,20 @@ class CleanerScreen(Screen):
             " профиль: {profile} • старше {days} дн. • удаление: {mode} ").format(
                 profile=self.profile, days=self.older_than or "—",
                 mode=tr("жёсткое (rm)") if self.hard else tr("в Корзину")))]
+        if self.scanned and self.perm_warn:
+            out.append("  " + p.color(tr("⚠ Нет прав (TCC): {ex} — выдайте "
+                                         "терминалу Полный доступ к диску")
+                                      .format(ex=", ".join(self.perm_warn[:2])),
+                                      t.yellow))
         if not self.scanned:
             out.append("")
             out.append("  " + p.color(tr("Нажмите «s», чтобы просканировать диск."), t.bold))
             out.append("")
             for i, name in enumerate(junk.PROFILES):
                 mark = p.color(t.arrow + " ", t.cyan) if name == self.profile else "  "
-                out.append(f"  {mark}{p.color(name, t.bold)}  — " +
-                           p.color(tr(_profile_desc(name)), t.dim))
+                line = f"  {mark}{p.color(name, t.bold)}  — " + \
+                    p.color(tr(_profile_desc(name)), t.dim)
+                out.append(truncate(line, w))
             out.append("")
             out.append("  " + p.color(tr("p — сменить профиль,  i — фильтр по возрасту"),
                                       t.dim))
@@ -817,6 +902,7 @@ class CleanerScreen(Screen):
             return
         total = sum(t.size for t in sel)
         root_needed = any(t.root_required for t in sel)
+        dangerous = [t for t in sel if t.dangerous]
         lines = [
             tr("Целей: {n}   Объём: {size}").format(n=len(sel), size=human(total)),
             "",
@@ -825,6 +911,11 @@ class CleanerScreen(Screen):
         ]
         if root_needed:
             lines.append(tr("Часть целей системные — потребуется пароль sudo."))
+        if dangerous:
+            lines += ["", tr("⚠ ОПАСНЫЕ ЦЕЛИ — это НЕ кэш, а данные:")]
+            lines += [f"  • {tr(t.name)} ({human(t.size)})" for t in dangerous[:5]]
+            lines.append(tr("Веса моделей и диски контейнеров придётся "
+                            "создавать/скачивать заново!"))
         lines += ["", tr("Продолжить?")]
 
         def act(res: str) -> None:
@@ -838,7 +929,8 @@ class CleanerScreen(Screen):
 
         self.app.confirm(tr("Очистка"), lines, yes_label=tr("очистить"),
                          no_label=tr("Отмена"),
-                         kind="danger" if self.hard else "warn", callback=act)
+                         kind="danger" if (self.hard or dangerous) else "warn",
+                         callback=act)
 
     def _do_clean(self, sel: Sequence[junk.JunkTarget]) -> None:
         deleter = Deleter(self.app.paths,
@@ -874,7 +966,8 @@ class CleanerScreen(Screen):
 def _profile_desc(name: str) -> str:
     return {
         "basic": "кэши пользователя и системы, логи, crash-отчёты",
-        "dev": "+ Xcode, симуляторы, brew, pip/npm/go/cargo/gradle, IDE, Docker",
+        "dev": "+ Xcode, симуляторы, brew, pip/npm/go/cargo/gradle, IDE, Docker, "
+               "веса ИИ-моделей (⚠ отдельно)",
         "aggressive": "+ кэши браузеров, мессенджеров, облачных клиентов",
     }.get(name, "")
 
@@ -903,6 +996,7 @@ class DeepScreen(Screen):
 
     def do_scan(self) -> None:
         def work(tick):
+            self.app.begin_scan()
             self.items = junk.deep_scan(self.app.paths, max_depth=7,
                                         risk_max=self.risk_max,
                                         older_than_days=self.older_than,
@@ -911,8 +1005,14 @@ class DeepScreen(Screen):
         self.scanned = True
         self.rebuild()
         safe = sum(i.size for i in self.items if i.risk == junk.RISK_SAFE)
-        self.app.say(tr("Найдено {n} объектов; безопасного мусора на {size}")
-                     .format(n=len(self.items), size=human(safe)), "info")
+        warns = permission_warnings(self.app.paths)
+        if warns:
+            self.app.say(tr("Нет прав на сканирование {n} каталогов: {ex}. "
+                            "Выдайте терминалу Полный доступ к диску (FDA)")
+                         .format(n=len(warns), ex=", ".join(warns[:2])), "warn")
+        else:
+            self.app.say(tr("Найдено {n} объектов; безопасного мусора на {size}")
+                         .format(n=len(self.items), size=human(safe)), "info")
 
     def rebuild(self) -> None:
         p, t = self.app.p, self.app.theme
@@ -1059,6 +1159,7 @@ class OrphansScreen(Screen):
 
     def do_scan(self) -> None:
         def work(tick):
+            self.app.begin_scan()
             tick(0, 3, "читаю реестр установленных программ…")
             reg = leftovers.AppRegistry.build(self.app.paths)
             self.app.registry = reg
@@ -1074,10 +1175,12 @@ class OrphansScreen(Screen):
         self.scanned = True
         self.rebuild()
         orph = [i for i in self.items if i.verdict == leftovers.VERDICT_ORPHAN]
-        self.app.say(tr("Установлено программ: {n} • сирот: {orph} на {size}")
-                     .format(n=len(self.registry.apps) if self.registry else 0,
-                             orph=len(orph),
-                             size=human(sum(i.size for i in orph))), "info")
+        self.app.report_denials()
+        if not permission_warnings(self.app.paths):
+            self.app.say(tr("Установлено программ: {n} • сирот: {orph} на {size}")
+                         .format(n=len(self.registry.apps) if self.registry else 0,
+                                 orph=len(orph),
+                                 size=human(sum(i.size for i in orph))), "info")
 
     def rebuild(self) -> None:
         p, t = self.app.p, self.app.theme
@@ -1884,6 +1987,255 @@ class LogScreen(Screen):
 
 
 # --------------------------------------------------------------------------- #
+#  APFS-снапшоты (иллюзия свободного места)
+# --------------------------------------------------------------------------- #
+
+class SnapshotsScreen(Screen):
+    title = "APFS-снапшоты"
+    hints = (("r", "обновить"), ("Пробел", "отметить"), ("d", "удалить отмеченные"),
+             ("x", "удалить все"))
+
+    def __init__(self, app: App):
+        super().__init__(app)
+        self.dates: List[str] = []
+        self.loaded = False
+        self.list = ListView(multi=True)
+        self.feats = osprofile.get_os_features()
+
+    def on_enter(self, ctx: RenderContext) -> None:
+        if not self.loaded:
+            self.refresh()
+
+    def refresh(self) -> None:
+        def work(tick):
+            tick(0, 1, tr("читаю локальные снапшоты APFS…"))
+            self.dates = osprofile.list_local_snapshots("/")
+            tick(1, 1, "")
+        self.app.task("APFS-снапшоты", work)
+        self.loaded = True
+        rows = [Row(cells=["  " + d], meta=d) for d in self.dates]
+        self.list = ListView(rows, multi=True)
+
+    def render(self, ctx: RenderContext) -> List[str]:
+        p, t = self.app.p, self.app.theme
+        w = ctx.width
+        out = [p.hline(w, t.tl, t.tr, tr(" локальные снапшоты тома / "))]
+        if not osprofile.snapshots_supported():
+            out += ["", "  " + p.color(tr("Доступно только на macOS (tmutil)."), t.dim)]
+            return out
+        out += [
+            "  " + tr("Почистили кэши, а Finder показывает то же свободное место?"),
+            "  " + p.color(tr("Виноваты локальные снапшоты APFS: они удерживают "
+                              "удалённые блоки данных."), t.dim),
+            "",
+        ]
+        if not self.loaded:
+            out.append("  " + p.color(tr("нажмите «r», чтобы прочитать список"), t.dim))
+            return out
+        if not self.dates:
+            out.append("  " + p.color(tr("Локальных снапшотов нет — место не «зависло»."),
+                                      t.green))
+            return out
+        out.append("  " + tr("Найдено снапшотов: {n}").format(
+            n=p.color(str(len(self.dates)), t.bold)))
+        body_h = max(4, ctx.height - len(out) - 8)
+        out.extend(self.list.render(p, w - 2, body_h))
+        out.append(p.sep(w))
+        out.append("  " + p.color(tr("Удаление снапшотов требует sudo и необратимо: "
+                                     "это точки восстановления Time Machine."),
+                                  t.yellow))
+        return out
+
+    def _selected_dates(self) -> List[str]:
+        return [r.meta for r in self.list.rows if r.checked and isinstance(r.meta, str)]
+
+    def on_key(self, key: str, ctx: RenderContext) -> Optional[Screen]:
+        if key == "r":
+            self.refresh()
+            self.app.say(tr("Снапшотов: {n}").format(n=len(self.dates)), "info")
+            return None
+        if key in (Key.UP, "k"):
+            self.list.move(-1); return None
+        if key in (Key.DOWN, "j"):
+            self.list.move(1); return None
+        if key == Key.PAGEDOWN:
+            self.list.page(ctx.body_height); return None
+        if key == Key.PAGEUP:
+            self.list.page(ctx.body_height, up=True); return None
+        if key == Key.SPACE:
+            self.list.toggle(); return None
+        if key == "a":
+            self.list.toggle_all(); return None
+        if key == "d":
+            self._delete(self._selected_dates()); return None
+        if key == "x":
+            self._delete(list(self.dates)); return None
+        return super().on_key(key, ctx)
+
+    def _delete(self, dates: List[str]) -> None:
+        if not dates:
+            self.app.say(tr("Ничего не отмечено"), "warn")
+            return
+        if not self.app.sudo_or_skip():
+            self.app.say(tr("sudo недоступен — снапшоты не удалить"), "warn")
+            return
+
+        def act(res: str) -> None:
+            if res != "y":
+                self.app.say(tr("Отменено"), "warn")
+                return
+
+            def work(tick):
+                ok = 0
+                errs = 0
+                for i, d in enumerate(dates):
+                    tick(i, len(dates), d)
+                    good, _msg = osprofile.delete_local_snapshot(
+                        d, use_sudo=self.app.use_sudo)
+                    ok += 1 if good else 0
+                    errs += 0 if good else 1
+                tick(len(dates), len(dates), "")
+                self._result = (ok, errs)
+            self._result = (0, 0)
+            self.app.task("Удаление снапшотов", work)
+            ok, errs = self._result
+            self.app.journal.add("snapshots", f"{ok}/{len(dates)}")
+            self.app.say(tr("Удалено снапшотов: {ok} из {n}").format(
+                ok=ok, n=len(dates)) + (f", {tr('ошибок')}: {errs}" if errs else ""),
+                "ok" if not errs else "warn")
+            self.refresh()
+
+        self.app.confirm(tr("APFS-снапшоты"),
+                         [tr("Удалить снапшотов: {n}?").format(n=len(dates)), "",
+                          tr("Это НЕОБРАТИМО: снапшоты — точки восстановления "
+                             "Time Machine на этом томе."),
+                          tr("Место освободится сразу после удаления.")],
+                         yes_label=tr("удалить"), no_label=tr("Отмена"),
+                         kind="danger", callback=act)
+
+
+# --------------------------------------------------------------------------- #
+#  Автоочистка по расписанию (launchd)
+# --------------------------------------------------------------------------- #
+
+class ScheduleScreen(Screen):
+    title = "автоочистка по расписанию"
+    hints = (("Enter", "установить"), ("d", "удалить агент"), ("r", "обновить"),
+             ("w", "день"), ("h", "час"), ("p", "профиль"))
+
+    def __init__(self, app: App):
+        super().__init__(app)
+        self.weekday = 0
+        self.hour = 4
+        self.minute = 0
+        self.profile = "basic"
+        self.status: Optional[schedule.AgentStatus] = None
+
+    def on_enter(self, ctx: RenderContext) -> None:
+        if self.status is None:
+            self.reload()
+
+    def reload(self) -> None:
+        self.status = schedule.agent_status(self.app.paths)
+
+    def render(self, ctx: RenderContext) -> List[str]:
+        p, t = self.app.p, self.app.theme
+        w = ctx.width
+        st = self.status or schedule.agent_status(self.app.paths)
+        out = [p.hline(w, t.tl, t.tr, tr(" launchd-агент еженедельной очистки "))]
+        for ln in st.summary(self.app.paths):
+            out.append("  " + ln)
+        out.append(p.hline(w, t.lt, t.rt, tr(" Параметры ")))
+        wd = p.color(tr(schedule.WEEKDAYS.get(self.weekday, "?")), t.bold)
+        out.append("  " + tr("Когда: ") + wd + p.color(
+            f"  {self.hour:02d}:{self.minute:02d}", t.bold))
+        out.append("  " + tr("Профиль: ") + p.color(self.profile, t.bold))
+        out.append("  " + tr("Запуск: ") + p.color(
+            truncate(st.runner or "—", max(10, w - 16)), t.dim))
+        out += [
+            "",
+            "  " + p.color(tr("Агент запускает maccc clean --profile {p} -y "
+                               "(всё в Корзину, без sudo, без внешних команд).")
+                            .format(p=self.profile), t.dim),
+            "  " + p.color(tr("Тихий отчёт каждого запуска пишется в "
+                               "~/.mac_tweaker/scheduled.log"), t.dim),
+            "",
+            "  " + p.color("w / h / p", t.bold) + "  "
+            + p.color(tr("— день недели / час / профиль"), t.dim),
+            "  " + p.color("Enter / d", t.bold) + "  "
+            + p.color(tr("— создать или удалить агент"), t.dim),
+        ]
+        return out
+
+    def on_key(self, key: str, ctx: RenderContext) -> Optional[Screen]:
+        if key == "r":
+            self.reload()
+            self.app.say(tr("Статус обновлён"), "ok")
+            return None
+        if key == "w":
+            self.weekday = (self.weekday + 1) % 7
+            return None
+        if key == "h":
+            self.hour = (self.hour + 1) % 24
+            return None
+        if key == "p":
+            profiles = ("basic", "dev")
+            i = profiles.index(self.profile) if self.profile in profiles else 0
+            self.profile = profiles[(i + 1) % len(profiles)]
+            return None
+        if key == Key.ENTER:
+            self._install()
+            return None
+        if key == "d":
+            self._uninstall()
+            return None
+        return super().on_key(key, ctx)
+
+    def _install(self) -> None:
+        def act(res: str) -> None:
+            if res != "y":
+                self.app.say(tr("Отменено"), "warn")
+                return
+            ok, msg = schedule.install_agent(
+                self.app.paths, profile=self.profile, weekday=self.weekday,
+                hour=self.hour, minute=self.minute)
+            self.app.journal.add("schedule-install", schedule.AGENT_LABEL,
+                                 {"ok": ok, "profile": self.profile})
+            self.reload()
+            self.app.alert(tr("Автоочистка по расписанию"), [msg],
+                           kind="ok" if ok else "warn")
+
+        wd = tr(schedule.WEEKDAYS.get(self.weekday, "?"))
+        self.app.confirm(
+            tr("Автоочистка по расписанию"),
+            [tr("Создать агент {label}?").format(label=schedule.AGENT_LABEL), "",
+             tr("Каждый {weekday} в {hour:02d}:{minute:02d}: очистка профиля "
+                "«{profile}», всё в Корзину, отчёт в ~/.mac_tweaker/").format(
+                    weekday=wd, hour=self.hour, minute=self.minute,
+                    profile=self.profile),
+             tr("Файл: ~/Library/LaunchAgents/{label}.plist").format(
+                    label=schedule.AGENT_LABEL)],
+            yes_label=tr("создать"), no_label=tr("Отмена"), kind="info",
+            callback=act)
+
+    def _uninstall(self) -> None:
+        def act(res: str) -> None:
+            if res != "y":
+                return
+            ok, msg = schedule.uninstall_agent(self.app.paths)
+            self.app.journal.add("schedule-uninstall", schedule.AGENT_LABEL,
+                                 {"ok": ok})
+            self.reload()
+            self.app.alert(tr("Автоочистка по расписанию"), [msg],
+                           kind="ok" if ok else "warn")
+
+        self.app.confirm(tr("Автоочистка по расписанию"),
+                         [tr("Удалить агент и снять его с launchd?")],
+                         yes_label=tr("удалить"), no_label=tr("Отмена"),
+                         kind="warn", callback=act)
+
+
+# --------------------------------------------------------------------------- #
 #  Справка
 # --------------------------------------------------------------------------- #
 
@@ -1919,7 +2271,7 @@ class HelpScreen(Screen):
             elif _re.fullmatch(r"[-─]{3,}", stripped):
                 continue                      # декоративные линейки пропускаем
             elif ln.startswith(("Управление", "Безопасность", "Профили очистки",
-                                "Экран «Остатки")):
+                                "Экран «Остатки", "Автоочистка", "APFS-снапшоты")):
                 out.append(p.hline(w, t.lt, t.rt, f" {stripped} "))
             else:
                 parts = [x for x in _re.split(r" {2,}", stripped, maxsplit=1)]

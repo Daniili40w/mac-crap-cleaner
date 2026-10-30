@@ -21,6 +21,7 @@ import os
 import shutil
 import stat as stat_module
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -33,20 +34,89 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 #  В macOS часть каталогов (*.datavault, зоны TCC, некоторые /Library/Caches)
 #  запрещает даже lstat(): OSError [Errno 1] Operation not permitted.
 #  Любой stat ниже обёрнут, чтобы сканер пропускал их, а не падал.
+#
+#  Отказ в доступе (EPERM/EACCES) дополнительно запоминается в реестре
+#  denied-путей: интерфейс честно показывает «нет прав на сканирование X,
+#  выдайте Full Disk Access», вместо того чтобы молча пропускать каталоги.
 # --------------------------------------------------------------------------- #
+
+_denied_lock = threading.Lock()
+_denied_paths: List[str] = []
+DENIED_CAP = 60
+
+
+def record_denied(path) -> None:
+    """Запомнить каталог, который не удалось прочитать из-за прав (TCC/SIP)."""
+    s = str(path)
+    with _denied_lock:
+        if s not in _denied_paths:
+            _denied_paths.append(s)
+            if len(_denied_paths) > DENIED_CAP:
+                del _denied_paths[0]
+
+
+def denied_paths() -> List[str]:
+    """Снимок списка каталогов, к которым не было доступа."""
+    with _denied_lock:
+        return list(_denied_paths)
+
+
+def reset_denied() -> None:
+    """Очистить реестр отказов (перед новым сканом)."""
+    with _denied_lock:
+        _denied_paths.clear()
+
+
+def _is_perm_error(exc: OSError) -> bool:
+    return exc.errno in (errno.EPERM, errno.EACCES)
+
+
+def permission_warnings(paths: "Paths", limit: int = 3) -> List[str]:
+    """Человеческие предупреждения о каталогах, закрытых TCC/SIP.
+
+    Показываем только то, что реально лечится выдачей Full Disk Access:
+    домашний каталог и /Library. DataVault и /System — зона SIP, FDA там
+    не поможет, поэтому в список не попадают.
+    """
+    home_s = str(paths.home)
+    lib_s = str(paths.lib)
+    syslib_s = str(paths.sys_lib)
+    out: List[str] = []
+    for p in denied_paths():
+        if "datavault" in p.lower():
+            continue
+        if not (p.startswith(home_s + os.sep) or p == home_s
+                or p.startswith(lib_s + os.sep)
+                or p.startswith(syslib_s + os.sep)
+                or p.startswith("/Library" + os.sep)):
+            continue
+        if any(p.startswith(k + os.sep) for k in out):
+            continue                          # родитель уже перечислен
+        out.append(p)
+        if len(out) >= limit:
+            break
+    return [paths.short(Path(p)) for p in out]
 
 
 def safe_lstat(p) -> Optional[os.stat_result]:
     try:
         return os.lstat(p)
-    except (OSError, ValueError):
+    except OSError as exc:
+        if _is_perm_error(exc):
+            record_denied(p)
+        return None
+    except ValueError:
         return None
 
 
 def safe_stat(p) -> Optional[os.stat_result]:
     try:
         return os.stat(p)
-    except (OSError, ValueError):
+    except OSError as exc:
+        if _is_perm_error(exc):
+            record_denied(p)
+        return None
+    except ValueError:
         return None
 
 
@@ -62,14 +132,22 @@ def safe_islink(p) -> bool:
 def safe_isdir(p) -> bool:
     try:
         return os.path.isdir(p)
-    except (OSError, ValueError):
+    except OSError as exc:
+        if _is_perm_error(exc):
+            record_denied(p)
+        return False
+    except ValueError:
         return False
 
 
 def safe_isfile(p) -> bool:
     try:
         return os.path.isfile(p)
-    except (OSError, ValueError):
+    except OSError as exc:
+        if _is_perm_error(exc):
+            record_denied(p)
+        return False
+    except ValueError:
         return False
 
 
@@ -77,7 +155,11 @@ def safe_scandir(p) -> List[os.DirEntry]:
     try:
         with os.scandir(p) as it:
             return list(it)
-    except (OSError, ValueError):
+    except OSError as exc:
+        if _is_perm_error(exc):
+            record_denied(p)
+        return []
+    except ValueError:
         return []
 
 
@@ -345,6 +427,25 @@ def _app_support_cache_ok(s: str, paths: Paths) -> bool:
     return False
 
 
+#: Внутри TCC-защищённых каталогов (Containers, Application Support) эти
+#: подпути всё-таки считаются безопасными целями: кэш-зоны песочных
+#: приложений и данные контейнеров, которые чистятся ПОД ОТДЕЛЬНЫМ
+#: подтверждением (см. junk.JunkSpec.dangerous).
+PROTECTED_ALLOW_GLOBS: Tuple[str, ...] = (
+    "*/Library/Containers/*/Data/Library/Caches",
+    "*/Library/Containers/*/Data/Library/Caches/*",
+    "*/Library/Containers/*/Data/Library/Logs/*",
+    "*/Library/Containers/com.docker.docker/Data/vms/*",
+    "*/Library/Application Support/LM Studio/models/*",
+    "*/Library/Application Support/LM Studio/.internal/downloads/*",
+)
+
+
+def _protected_allowed(s: str) -> bool:
+    """Точечное исключение: путь внутри защищённого префикса, но чистить можно."""
+    return any(fnmatch.fnmatch(s, pat) for pat in PROTECTED_ALLOW_GLOBS)
+
+
 def is_safe(p, paths: Paths) -> bool:
     """Главный предохранитель: можно ли вообще трогать этот путь."""
     try:
@@ -359,6 +460,8 @@ def is_safe(p, paths: Paths) -> bool:
     if is_datavault(Path(s)):
         return False
     if _app_support_cache_ok(s, paths):
+        return True
+    if _protected_allowed(s):
         return True
     for prot in paths.protected_prefixes():
         if s == prot or s.startswith(prot + os.sep):
@@ -437,6 +540,22 @@ def run(cmd: Sequence[str], timeout: int = 900) -> Tuple[int, str]:
 
 def have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
+
+
+def workers() -> int:
+    """Число потоков для параллельного обхода/измерения дерева каталогов.
+
+    MACTWEAKER_NO_THREADS=1 отключает параллелизм (тесты, отладка).
+    Обход каталогов — I/O-задача: GIL освобождается на системных вызовах,
+    поэтому ThreadPoolExecutor из стандартной библиотеки даёт реальное
+    ускорение на APFS-томах с миллионами мелких файлов.
+    """
+    if os.environ.get("MACTWEAKER_NO_THREADS"):
+        return 1
+    try:
+        return max(2, min(16, (os.cpu_count() or 2) * 2))
+    except (ValueError, OSError):
+        return 4
 
 
 def is_root() -> bool:
@@ -588,8 +707,13 @@ class Deleter:
 
     def _finder_available(self) -> bool:
         if self._finder_ok is None:
+            # Finder переносит файлы в НАСТОЯЩУЮ ~/.Trash, а журнал отката ищет
+            # их в paths.trash. Поэтому Finder — только когда работаем с реальным
+            # домашним каталогом (в тестах/песочнице с MACTWEAKER_HOME — mv).
             self._finder_ok = (
                 os.uname().sysname == "Darwin" and have("osascript")
+                and not os.environ.get("MACTWEAKER_HOME")
+                and self.paths.home == Path(os.path.expanduser("~"))
             )
         return self._finder_ok
 

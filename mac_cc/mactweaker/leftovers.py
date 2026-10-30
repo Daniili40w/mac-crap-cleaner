@@ -317,6 +317,29 @@ TOOL_NAMES = frozenset({
 SERVICE_HINTS = ("crashpad", "crashlytics", "preferences", "caches", "cache",
                  "logs", "updates", "updater", "installer", "tmp", "temp")
 
+#: Маркеры данных Electron/Tauri-приложений. Современные Electron-программы
+#: часто имеют неполный Info.plist (или вообще не читаются как .app), зато
+#: их профиль в Application Support узнаётся по характерным подкаталогам.
+#: Если ≥2 маркеров на месте, а самого приложения в реестре нет — это сирота.
+ELECTRON_MARKERS = frozenset({
+    "gpucache", "local storage", "session storage", "indexeddb", "code cache",
+    "dawngraphitecache", "dawnwebgpucache", "blob_storage", "network",
+    "service worker", "crashpad", "webkit", "databases", "cache_storage",
+    "preferences", "local state", "shadercache", "grshadercache",
+})
+
+
+def looks_like_app_profile(p: Path, min_markers: int = 2) -> bool:
+    """Похож ли каталог на профиль настольного приложения (Electron/Tauri/CEF)."""
+    try:
+        if not safe_isdir(p):
+            return False
+        names = {e.name.lower() for e in safe_scandir(p)}
+    except OSError:
+        return False
+    hits = sum(1 for n in names if n in ELECTRON_MARKERS)
+    return hits >= min_markers
+
 
 # --------------------------------------------------------------------------- #
 #  Реестр установленных программ
@@ -440,9 +463,24 @@ class AppRegistry:
     def has_vendor(self, bid: str) -> bool:
         """Тот же вендор, что у какого-то установленного приложения."""
         parts = (bid or "").lower().split(".")
+        if len(parts) == 2:
+            # «group com.docker» из Group Containers: вендор = вторая часть
+            return parts[1] in self.vendors
         if len(parts) < 3:
             return False
         return parts[1] in self.vendors
+
+    def has_id_prefix(self, bid: str) -> bool:
+        """Установлено приложение, чей bundle id начинается с этого префикса.
+
+        Спасает от ложных сирот в Group Containers: «com.docker» не совпадает
+        с «com.docker.docker» посимвольно, но это данные того же вендора.
+        """
+        bid = (bid or "").lower().strip()
+        if not bid:
+            return False
+        pref = bid + "."
+        return any(b == bid or b.startswith(pref) for b in self.bundle_ids)
 
     def has_name(self, name: str) -> bool:
         n = (name or "").lower().strip()
@@ -627,7 +665,8 @@ def scan_leftovers(paths: Paths,
             if label in ("Logs", "/Library/Logs"):
                 continue
 
-            verdict, tpl, args, curated = classify(owner, name, kind, reg, paths)
+            verdict, tpl, args, curated = classify(owner, name, kind, reg, paths,
+                                                   full_path=p)
 
             size, files = dir_size(p) if safe_isdir(p) else (_size(p), 1)
             if size < min_size:
@@ -682,8 +721,14 @@ def _age_days(ts: float) -> float:
 
 
 def classify(owner: str, raw_name: str, kind: str, reg: AppRegistry,
-             paths: Paths) -> Tuple[str, str, Tuple[str, ...]]:
-    """Вердикт по владельцу. Возвращает (verdict, evidence, curated_ids)."""
+             paths: Paths, full_path: Optional[Path] = None) -> Tuple[str, str, dict, Tuple[str, ...]]:
+    """Вердикт по владельцу. Возвращает (verdict, evidence, curated_ids).
+
+    full_path — полный путь элемента (опционально): нужен для расширенной
+    эвристики Electron/Tauri — данные приложения узнаются по характерным
+    подкаталогам профиля, даже если Info.plist неполный или приложение
+    удалено вместе с ним.
+    """
     low = owner.lower()
 
     # 1. Apple-идентификаторы — системные компоненты
@@ -726,6 +771,11 @@ def classify(owner: str, raw_name: str, kind: str, reg: AppRegistry,
 
     # 7. Похоже на bundle id, но владельца нет → сирота
     if BUNDLE_ID_RE.match(owner):
+        # Group Containers / неполные id: «com.docker» при установленном
+        # «com.docker.docker» — это данные живого приложения
+        if reg.has_id_prefix(owner):
+            return (VERDICT_ALIVE, "установлено приложение с id «{owner}».*",
+                    {"owner": owner}, ())
         if reg.has_vendor(owner):
             vendor = low.split(".")[1]
             return (VERDICT_ALIVE,
@@ -738,6 +788,14 @@ def classify(owner: str, raw_name: str, kind: str, reg: AppRegistry,
     if reg.has_word(owner):
         return (VERDICT_ALIVE, "похоже на установленное «{name}»",
                 {"name": owner}, ())
+
+    # 9. Расширенная эвристика: профиль Electron/Tauri-приложения, которого
+    #    уже нет на диске (папка в Application Support совпадает по имени с
+    #    бывшим .app, Info.plist неполный, но структура профиля на месте).
+    if full_path is not None and kind == "name" and looks_like_app_profile(full_path):
+        return (VERDICT_ORPHAN,
+                "данные Electron/Tauri-приложения «{name}»: сама программа "
+                "больше не установлена", {"name": owner}, ())
 
     return VERDICT_UNKNOWN, "владелец не определён — не трогаем", {}, ()
 

@@ -62,6 +62,25 @@ def refresh_fixture() -> None:
         pass
 
 
+def set_winsize(fdesc: int, pid_child: int, rows: int = 34, cols: int = 110) -> None:
+    """Реальный размер pty + SIGWINCH. pty.fork() оставляет 80×24 на macOS и
+    0×0 на Linux — унифицируем, чтобы приложение не уходило в режим «узкого
+    окна» и не зависело от платформы."""
+    try:
+        import fcntl
+        import struct
+        import termios
+        fcntl.ioctl(fdesc, termios.TIOCSWINSZ,
+                    struct.pack("HHHH", rows, cols, 0, 0))
+    except (OSError, ImportError):
+        pass
+    try:
+        import signal
+        os.kill(pid_child, signal.SIGWINCH)
+    except (OSError, ImportError):
+        pass
+
+
 def main() -> int:
     refresh_fixture()
     env = dict(os.environ)
@@ -87,6 +106,8 @@ def main() -> int:
         except BaseException:                     # noqa: BLE001
             os._exit(99)
 
+    set_winsize(fd, pid)
+
     def drain_fd(fd: int, seconds: float = 0.7) -> bytes:
         buf = b""
         end = time.time() + seconds
@@ -105,23 +126,35 @@ def main() -> int:
 
     def drain(seconds: float = 0.7) -> bytes:
         return drain_fd(fd, seconds)
+
+    def drain_until(fdesc: int, needle: bytes, timeout: float,
+                    settle: float = 0.35) -> bytes:
+        """Читать вывод, пока не появится needle (или до таймаута), плюс короткая
+        дозадержка, чтобы кадр дорисовался. Спасение для медленных машин:
+        фиксированные паузы на виртуалках ненадёжны."""
         buf = b""
-        end = time.time() + seconds
+        end = time.time() + timeout
+        found_at = None
         while time.time() < end:
-            r, _, _ = select.select([fd], [], [], 0.15)
+            r, _, _ = select.select([fdesc], [], [], 0.1)
             if not r:
+                if found_at is not None:
+                    break
                 continue
             try:
-                chunk = os.read(fd, 65536)
+                chunk = os.read(fdesc, 65536)
             except OSError:
                 break
             if not chunk:
                 break
             buf += chunk
+            if found_at is None and needle in buf:
+                found_at = time.time()
+                end = min(end, found_at + settle)
         return buf
 
     frames = {}
-    boot = drain(1.5)
+    boot = drain_until(fd, b"Mac Crap Cleaner", 10.0)
     frames["boot"] = boot
 
     # сценарий: меню → очистка → скан → отметить всё → x → «нет» → назад
@@ -162,9 +195,24 @@ def main() -> int:
     ]
     for name, keys in scenario:
         if keys:
-            os.write(fd, keys.encode())
-        frames[name] = drain(2.2 if name in ("disk-open", "disk-wait", "info-top")
-                             else 1.1 if name.endswith("scan") else 0.5)
+            try:
+                os.write(fd, keys.encode())
+            except OSError as exc:
+                # ребёнок умер — сохрани накопленные кадры для диагностики
+                try:
+                    Path("/tmp/pty_fail.txt").write_text(
+                        f"STEP={name} ERR={exc}\n"
+                        + ANSI.sub("", b"".join(frames.values())
+                                   .decode("utf-8", "replace"))[-4000:])
+                except OSError:
+                    pass
+                raise
+        if name in ("orphans-down", "orphans-up"):
+            # ждём именно кадр с курсором (инверсная строка), а не фикс. паузу
+            frames[name] = drain_until(fd, b"\x1b[7m", 8.0)
+        else:
+            frames[name] = drain(2.2 if name in ("disk-open", "disk-wait", "info-top")
+                                 else 1.6 if name.endswith("scan") else 0.5)
 
     try:
         os.close(fd)
@@ -207,13 +255,14 @@ def main() -> int:
 
     # курсор реально ходит ВВЕРХ по списку с заголовками групп
     def cursor_row(frame_raw: str) -> int:
-        """Строка с курсором (инверсия) в ПОСЛЕДНЕМ кадре порции вывода."""
-        frames = [f for f in frame_raw.split("\x1b[H") if f.strip()]
-        if not frames:
-            return -1
-        for i, ln in enumerate(frames[-1].split("\n")):
-            if "\x1b[7m" in ln:
-                return i
+        """Строка с курсором (инверсия) в последнем ПОЛНОМ кадре порции вывода.
+        Хвост порции на медленных машинах может быть частичной перерисовкой —
+        тогда берём предыдущий завершённый кадр."""
+        screens = [f for f in frame_raw.split("\x1b[H") if f.strip()]
+        for scr in reversed(screens):
+            for i, ln in enumerate(scr.split("\n")):
+                if "\x1b[7m" in ln:
+                    return i
         return -1
 
     down_frame = frames.get("orphans-down", b"").decode("utf-8", "replace")
@@ -247,6 +296,8 @@ def main() -> int:
         env2 = dict(os.environ)
         env2.pop("MACC_LANG", None)
         env2["TERM"] = "xterm-256color"
+        env2["COLUMNS"] = "110"
+        env2["LINES"] = "34"
         if hasattr(os, "geteuid") and os.geteuid() == 0:
             try:
                 os.setgroups([]); os.setgid(65534); os.setuid(65534)
@@ -256,13 +307,15 @@ def main() -> int:
             os.execve(sys.executable, [sys.executable, str(ENTRY)], env2)
         except BaseException:  # noqa: BLE001
             os._exit(99)
-    prompt = drain_fd(fd2, 1.5)
+    set_winsize(fd2, pid2)
+    prompt = drain_until(fd2, b"Select [1/2]", 10.0)
     prompt_s = ANSI.sub("", prompt.decode("utf-8", "replace"))
     check("Select language" in prompt_s and "Русский" in prompt_s
           and "English" in prompt_s and "Select [1/2]" in prompt_s,
           "экран выбора языка показан при первом запуске")
     os.write(fd2, b"2\n")
-    en_frame = ANSI.sub("", drain_fd(fd2, 1.8).decode("utf-8", "replace"))
+    en_frame = ANSI.sub("", drain_until(fd2, b"Cache & junk cleanup", 12.0)
+                        .decode("utf-8", "replace"))
     check("Cache & junk cleanup" in en_frame and "Startup items" in en_frame,
           "после выбора «2» интерфейс английский")
     check("Mac Crap Cleaner - Less crap" in en_frame, "слоган под логотипом")

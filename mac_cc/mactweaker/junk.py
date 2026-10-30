@@ -35,6 +35,10 @@ class JunkSpec:
     JUNK_SPECS примечание обычно передаётся пятым позиционным аргументом.
     collect_specs() дополнительно проверяет тип needs_root, чтобы перепутанные
     аргументы ломались сразу и громко, а не молча в рантайме.
+
+    dangerous=True — это НЕ кэш: веса моделей, диски виртуальных машин,
+    образы контейнеров. Такие цели по умолчанию не отмечены, помечаются ⚠
+    в списке и требуют отдельного подтверждения перед удалением.
     """
     category: str
     name: str
@@ -42,6 +46,7 @@ class JunkSpec:
     patterns: Tuple[str, ...]
     note: str = ""
     needs_root: bool = False
+    dangerous: bool = False
 
     def resolve(self, paths: Paths) -> List[str]:
         """Подставить {home}/{lib}/{sys}/{syslib} в шаблоны."""
@@ -196,6 +201,39 @@ JUNK_SPECS: Tuple[JunkSpec, ...] = (
     JunkSpec("Приложения", "Кэш Adobe / офисных пакетов", "aggressive",
              ("{lib}/Caches/com.adobe.*", "{lib}/Caches/com.microsoft.*"),
              "Только кэш-каталоги, не лицензии и не настройки."),
+
+    # ---- современные пожиратели места (dev, под отдельным подтверждением) -- #
+    JunkSpec("ИИ и контейнеры", "Ollama: веса LLM-моделей (~/.ollama/models)",
+             "dev",
+             ("{home}/.ollama/models/*",),
+             "НЕ кэш! Это веса моделей: каждая заново скачивается гигабайтами. "
+             "Удаляйте только неиспользуемые модели (ollama rm).",
+             dangerous=True),
+    JunkSpec("ИИ и контейнеры", "LM Studio: скачанные модели", "dev",
+             ("{home}/.lmstudio/models/*", "{home}/.lmstudio/.internal/*",
+              "{home}/.cache/lm-studio/models/*",
+              "{appsupport}/LM Studio/models/*",
+              "{appsupport}/LM Studio/.internal/downloads/*"),
+             "НЕ кэш! Библиотека моделей и незавершённые загрузки. "
+             "Настройки и история чатов не трогаются.",
+             dangerous=True),
+    JunkSpec("ИИ и контейнеры", "OrbStack: данные виртуалок и контейнеров",
+             "dev",
+             ("{home}/.orbstack/data/*",),
+             "НЕ кэш! Виртуальные диски со всеми контейнерами, томами и "
+             "Linux-машинами. Альтернатива: orbctl delete / docker prune.",
+             dangerous=True),
+    JunkSpec("ИИ и контейнеры", "Docker Desktop: диск виртуалки (все образы)",
+             "dev",
+             ("{lib}/Containers/com.docker.docker/Data/vms/*",),
+             "НЕ кэш! Docker.raw хранит ВСЕ образы, контейнеры и volumes. "
+             "Для точечной очистки используйте docker system prune.",
+             dangerous=True),
+    JunkSpec("ИИ и контейнеры", "HuggingFace: кэш скачанных моделей", "dev",
+             ("{home}/.cache/huggingface/hub/*",),
+             "Модели и датасеты из hub: перескачаются при следующем запуске. "
+             "Проверьте, не используются ли они в ваших проектах.",
+             dangerous=True),
 )
 
 #: Внешние команды-очистки (вызываются вместо удаления файлов).
@@ -233,6 +271,7 @@ class JunkTarget:
     selected: bool = True
     kind: str = "paths"                       # paths | command | downloads | trash
     command: Optional[Tuple[str, ...]] = None
+    dangerous: bool = False                   # веса моделей/диски VM — не кэш!
 
     @property
     def age_days(self) -> float:
@@ -265,6 +304,24 @@ def collect_specs(profile: str = "basic") -> List[JunkSpec]:
     return out
 
 
+def _ai_specs(major: Optional[int] = None) -> List[JunkSpec]:
+    """Динамические спеки под версию ОС: кэши локальных моделей Apple
+    Intelligence (Tahoe 26+). Удалять их опасно: система потратит часы и
+    гигабайты трафика на повторную загрузку, поэтому только «спросить»."""
+    from . import osprofile
+    feats = osprofile.get_os_features(major=major)
+    if not feats.ai_caches_paths:
+        return []
+    return [JunkSpec(
+        "ИИ и контейнеры",
+        "Apple Intelligence: кэши локальных моделей",
+        "basic",
+        feats.ai_caches_paths,
+        "Веса локальных ИИ-моделей системы (речь, Siri). После удаления macOS "
+        "скачает их заново — это гигабайты трафика. Только если уверены.",
+        dangerous=True)]
+
+
 def scan_junk(paths: Paths,
               profile: str = "basic",
               older_than_days: Optional[float] = None,
@@ -272,9 +329,16 @@ def scan_junk(paths: Paths,
               excludes: Sequence[str] = (),
               with_commands: bool = True,
               progress=None) -> List[JunkTarget]:
-    """Найти и измерить все цели. progress(done, total, label) — опционально."""
+    """Найти и измерить все цели. progress(done, total, label) — опционально.
+
+    Измерение размеров выполняется параллельно (ThreadPoolExecutor): на APFS
+    с миллионами мелких файлов это в разы быстрее последовательного обхода.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from .safety import workers
+
     targets: List[JunkTarget] = []
-    specs = collect_specs(profile)
+    specs = collect_specs(profile) + _ai_specs()
     total_steps = len(specs) + 2
 
     for i, spec in enumerate(specs):
@@ -292,6 +356,8 @@ def scan_junk(paths: Paths,
             profile=spec.profile,
             note=spec.note,
             paths=found,
+            dangerous=bool(spec.dangerous),
+            selected=not spec.dangerous,      # опасное — только вручную
             root_required=bool(spec.needs_root)))
 
     # старые установщики в ~/Downloads
@@ -325,12 +391,10 @@ def scan_junk(paths: Paths,
                                       note=note, kind="command",
                                       command=cmd, size=0))
 
-    # измерить размеры
-    for i, t in enumerate(targets):
-        if progress:
-            progress(len(specs) + (1 if i % 2 else 0), total_steps, t.name)
-        if t.kind == "command":
-            continue
+    # измерить размеры — параллельно по целям
+    measurable = [t for t in targets if t.kind != "command"]
+
+    def measure(t: JunkTarget) -> JunkTarget:
         size = files = 0
         mt = 0.0
         live: List[Path] = []
@@ -341,11 +405,26 @@ def scan_junk(paths: Paths,
             size += s
             files += c
             m = newest_mtime(p) if t.kind == "downloads" else 0.0
-            mt = max(mt, m)
+            if m > mt:
+                mt = m
             live.append(p)
         t.paths, t.size, t.files, t.mtime = live, size, files, mt
         if any(needs_root(p) for p in live):
             t.root_required = True
+        return t
+
+    if measurable:
+        n_workers = max(1, min(workers(), len(measurable)))
+        if n_workers == 1:
+            for i, t in enumerate(measurable):
+                if progress:
+                    progress(len(specs), total_steps, t.name)
+                measure(t)
+        else:
+            with ThreadPoolExecutor(max_workers=n_workers) as ex:
+                for i, t in enumerate(ex.map(measure, measurable)):
+                    if progress:
+                        progress(len(specs), total_steps, t.name)
 
     if progress:
         progress(total_steps, total_steps, "")
@@ -562,6 +641,61 @@ def _mtime_of(p: Path) -> float:
     return st.st_mtime if st else 0.0
 
 
+def _deep_visit(cur: Path, depth: int, max_depth: int, paths: Paths,
+                exact: Dict, globs: List, risk_max: int, min_size: int,
+                cutoff: Optional[float], excludes: Sequence[str], home_s: str,
+                seen: Set[str], seen_lock) -> Tuple[List[DeepItem], List[Path]]:
+    """Обработать один каталог: найти хлам и вернуть подлежащие обходу подкаталоги.
+
+    Общая ячейка работы и для последовательного, и для параллельного обхода.
+    seen защищён блокировкой — в потоки передаётся один набор.
+    """
+    items: List[DeepItem] = []
+    children: List[Path] = []
+    for e in safe_scandir(cur):
+        name = e.name
+        p = Path(e.path)
+        with seen_lock:
+            if e.path in seen:
+                continue
+            seen.add(e.path)
+        if is_datavault(p) or matches_exclude(p, excludes):
+            continue
+        try:
+            is_dir = e.is_dir(follow_symlinks=False)
+        except OSError:
+            continue
+        rel = e.path[len(home_s):].lstrip("/") if e.path.startswith(home_s) \
+            else e.path
+
+        if is_dir:
+            if name in DEEP_SKIP_DIRS or not is_traversable(p, paths):
+                continue
+            match = exact.get(name) or exact.get(name.lower())
+            if match and name in DIR_RULE_NAMES:
+                _add(items, p, match, min_size, cutoff)
+                continue
+            ctx_match = _match_context(rel, name, risk_max)
+            if ctx_match:
+                _add(items, p, ctx_match, min_size, cutoff)
+                continue
+            if depth < max_depth:
+                children.append(p)
+            continue
+
+        match = exact.get(name) or exact.get(name.lower())
+        if not match:
+            for pat, patlow, cat, risk, rule, note in globs:
+                if fnmatch_name(name, pat) or fnmatch_name(name.lower(), patlow):
+                    match = (cat, risk, rule, note)
+                    break
+        if not match:
+            match = _match_context(rel, name, risk_max)
+        if match:
+            _add(items, p, match, min_size, cutoff, is_file=True)
+    return items, children
+
+
 def deep_scan(paths: Paths,
               roots: Sequence[Path] = (),
               max_depth: int = 6,
@@ -570,68 +704,89 @@ def deep_scan(paths: Paths,
               risk_max: int = RISK_ASK,
               excludes: Sequence[str] = (),
               progress=None) -> List[DeepItem]:
-    """Обойти домашний каталог и найти «раскиданный» хлам."""
+    """Обойти домашний каталог и найти «раскиданный» хлам.
+
+    Обход параллельный: каждый каталог — задача в ThreadPoolExecutor
+    (стандартная библиотека, без сторонних зависимостей). На томах APFS с
+    миллионами мелких файлов (node_modules, кэши пакетных менеджеров) это
+    в разы быстрее и интерфейс не «зависает». MACTWEAKER_NO_THREADS=1
+    возвращает последовательный обход.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from .safety import workers
+
     roots = [Path(r) for r in roots] or [paths.home]
     cutoff = time.time() - older_than_days * 86400 if older_than_days else None
     exact, globs = _index_rules(risk_max)
 
     items: List[DeepItem] = []
+    items_lock = threading.Lock()
     seen: Set[str] = set()
-    visited = 0
+    seen_lock = threading.Lock()
+    counter = {"visited": 0}
+    counter_lock = threading.Lock()
     home_s = str(paths.home)
 
-    stack: List[Tuple[Path, int]] = [(r, 0) for r in roots]
-    while stack:
-        cur, depth = stack.pop()
-        if depth > max_depth:
-            continue
-        if progress and visited % 64 == 0:
-            progress(visited, 0, paths.short(cur))
-        for e in safe_scandir(cur):
-            visited += 1
-            name = e.name
-            p = Path(e.path)
-            if e.path in seen or is_datavault(p) or matches_exclude(p, excludes):
-                continue
-            try:
-                is_dir = e.is_dir(follow_symlinks=False)
-            except OSError:
-                continue
-            rel = e.path[len(home_s):].lstrip("/") if e.path.startswith(home_s) \
-                else e.path
+    def visit(cur: Path, depth: int) -> Tuple[List[DeepItem], List[Path]]:
+        found, children = _deep_visit(
+            cur, depth, max_depth, paths, exact, globs, risk_max, min_size,
+            cutoff, excludes, home_s, seen, seen_lock)
+        with counter_lock:
+            counter["visited"] += 1
+        return found, children
 
-            if is_dir:
-                if name in DEEP_SKIP_DIRS or not is_traversable(p, paths):
-                    continue
-                seen.add(e.path)
-                match = exact.get(name) or exact.get(name.lower())
-                if match and name in DIR_RULE_NAMES:
-                    _add(items, p, match, min_size, cutoff)
-                    continue
-                ctx = _match_context(rel, name, risk_max)
-                if ctx:
-                    _add(items, p, ctx, min_size, cutoff)
-                    continue
-                if depth < max_depth:
-                    stack.append((p, depth + 1))
+    n_workers = workers()
+    if n_workers <= 1:
+        # последовательный обход (тесты/отладка)
+        stack: List[Tuple[Path, int]] = [(r, 0) for r in roots]
+        while stack:
+            cur, depth = stack.pop()
+            if depth > max_depth:
                 continue
+            if progress and counter["visited"] % 64 == 0:
+                progress(counter["visited"], 0, paths.short(cur))
+            found, children = visit(cur, depth)
+            items.extend(found)
+            stack.extend((c, depth + 1) for c in children)
+    else:
+        # параллельный обход: каталог = задача; подкаталоги добавляют новые
+        state = {"pending": 0}
+        cond = threading.Condition()
 
-            seen.add(e.path)
-            match = exact.get(name) or exact.get(name.lower())
-            if not match:
-                for pat, patlow, cat, risk, rule, note in globs:
-                    if fnmatch_name(name, pat) or fnmatch_name(name.lower(), patlow):
-                        match = (cat, risk, rule, note)
+        with ThreadPoolExecutor(max_workers=n_workers) as ex:
+            def worker(cur: Path, depth: int) -> None:
+                try:
+                    found, children = visit(cur, depth)
+                except Exception:  # noqa: BLE001 — поток не должен ронять скан
+                    found, children = [], []
+                with cond:
+                    items.extend(found)
+                    new = 0
+                    for c in children:
+                        if depth + 1 <= max_depth:
+                            ex.submit(worker, c, depth + 1)
+                            new += 1
+                    state["pending"] += new - 1
+                    if state["pending"] <= 0:
+                        cond.notify_all()
+
+            with cond:
+                for r in roots:
+                    ex.submit(worker, r, 0)
+                    state["pending"] += 1
+            while True:
+                with cond:
+                    if state["pending"] <= 0:
                         break
-            if not match:
-                match = _match_context(rel, name, risk_max)
-            if match:
-                _add(items, p, match, min_size, cutoff, is_file=True)
+                    cond.wait(0.25)
+                if progress:
+                    progress(counter["visited"], 0, paths.short(roots[0]))
 
     items.extend(_desktop_safe_scan(paths, excludes))
 
     if progress:
-        progress(visited, visited, "")
+        progress(counter["visited"], counter["visited"], "")
     items.sort(key=lambda it: (-it.size, str(it.path)))
     return items
 
